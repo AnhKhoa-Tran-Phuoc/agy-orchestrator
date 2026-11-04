@@ -18,6 +18,7 @@ MANAGED_AGENT_FILES: tuple[str, ...] = (
     "worker-glm.md",
     "worker-mimo.md",
     "worker-nemotron.md",
+    "worker-nemotron-super.md",
 )
 
 MANAGED_SKILL_DIRS: tuple[str, ...] = (
@@ -27,6 +28,9 @@ MANAGED_SKILL_DIRS: tuple[str, ...] = (
     "two-stage-code-review",
     "verification-gate",
     "systematic-worker-debugging",
+    "openai-quota-shield",
+    "context-compaction-guard",
+    "optimal-worker-routing",
 )
 
 
