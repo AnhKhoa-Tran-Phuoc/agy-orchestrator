@@ -10,6 +10,10 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field
 
 from agy_orchestrator import __version__
+from agy_orchestrator.boss_fallback import (
+    prepare_web_handoff_bundle,
+    run_boss_with_fallback,
+)
 from agy_orchestrator.config import OrchestratorSettings
 from agy_orchestrator.inspector import (
     inspect_workspace_changes as _inspect_changes,
@@ -154,19 +158,54 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
                 f"Current Workspace Changes Snapshot:\n{diff_snapshot}"
             )
 
-        spec = WorkerTaskSpec(
-            prompt=boss_prompt,
-            workspace_dir=target_ws,
-            tier="complex",
-            model=explicit_model,
-            mode="plan",
+        return await run_boss_with_fallback(
+            runner=runner,
+            boss_prompt=boss_prompt,
+            workspace=target_ws,
+            primary_model=explicit_model,
             conversation_id=conversation_id,
-            concise_report=False,
             timeout_sec=timeout_sec,
-            max_summary_chars=3200,
+            open_browser_on_exhaustion=True,
         )
-        result = await runner.run_task(spec)
-        return result.to_compact_dict()
+
+    @mcp.tool(
+        description=(
+            "Package a Boss architecture or code-review request (including git diff snapshot), "
+            "copy it to the Windows Clipboard, save it to `.agy-orch/web_handoff/latest_boss_prompt.md`, "
+            "and open Gemini Web (`https://gemini.google.com/app` or Google AI Studio) in the browser "
+            "for instant Ctrl+V review when local Antigravity weekly quota is exhausted."
+        )
+    )
+    async def prepare_web_boss_handoff(
+        task_context: str,
+        review_type: Literal["plan", "code_review"] = "code_review",
+        workspace_dir: str | None = None,
+        open_browser: bool = True,
+        web_url: str = "https://gemini.google.com/app",
+    ) -> dict[str, Any]:
+        target_ws = cfg.resolve_workspace(workspace_dir)
+        diff_snapshot = await _inspect_changes(
+            workspace_dir=target_ws,
+            include_patch=True,
+            max_chars=3500,
+        )
+        header = (
+            "[GEMINI WEB BOSS — CHIEF ARCHITECT PLAN]\n"
+            if review_type == "plan"
+            else "[GEMINI WEB BOSS — STRICT CODE REVIEW (`[P0]`-`[P3]` & `VERDICT: APPROVED / CHANGES_REQUESTED`)]\n"
+        )
+        full_prompt = (
+            f"{header}\n"
+            f"## Task / Requirements\n{task_context}\n\n"
+            f"## Workspace Diff Snapshot\n```json\n{diff_snapshot}\n```\n"
+        )
+        return await prepare_web_handoff_bundle(
+            prompt=full_prompt,
+            workspace=target_ws,
+            copy_clipboard=True,
+            open_browser=open_browser,
+            web_url=web_url,
+        )
 
     @mcp.tool(
         description=(
