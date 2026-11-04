@@ -69,7 +69,7 @@ Mục tiêu cốt lõi:
 ## Cài đặt nhanh
 
 ```powershell
-git clone https://github.com/KokaTran98/agy-orchestrator.git
+git clone https://github.com/AIVIETNAM-AIO-Koka/agy-orchestrator.git
 cd agy-orchestrator
 
 python -m venv .venv
