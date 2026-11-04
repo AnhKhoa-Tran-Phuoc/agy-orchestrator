@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -142,6 +143,46 @@ async def ensure_cdp_browser_running(
     )
 
 
+def extract_and_write_web_files(
+    response_text: str,
+    workspace: Path,
+    output_files: list[str] | None = None,
+) -> list[str]:
+    """Extract `<file path="...">...</file>` blocks (or a single code block) from Gemini Web output and write to disk."""
+    written: list[str] = []
+    if not response_text:
+        return written
+
+    workspace_resolved = workspace.resolve()
+    pattern = re.compile(
+        r"<file\s+path=[\"']([^\"']+)[\"']\s*>\s*(?:```\w*\r?\n)?(.*?)(?:\r?\n```)?\s*</file>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    matches = pattern.findall(response_text)
+    for rel_path, content in matches:
+        clean_rel = rel_path.strip().lstrip("/\\")
+        if not clean_rel:
+            continue
+        target = (workspace_resolved / clean_rel).resolve()
+        if not str(target).startswith(str(workspace_resolved)):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content.strip() + "\n", encoding="utf-8")
+        written.append(clean_rel)
+
+    if not written and output_files and len(output_files) == 1:
+        fenced = re.findall(r"```(?:\w+)?\r?\n(.*?)\r?\n```", response_text, re.DOTALL)
+        if fenced:
+            clean_rel = output_files[0].strip().lstrip("/\\")
+            target = (workspace_resolved / clean_rel).resolve()
+            if str(target).startswith(str(workspace_resolved)):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(fenced[-1].strip() + "\n", encoding="utf-8")
+                written.append(clean_rel)
+
+    return written
+
+
 async def _query_single_cdp_instance(
     prompt: str,
     cdp_port: int,
@@ -150,6 +191,8 @@ async def _query_single_cdp_instance(
     timeout_sec: int = 180,
     wait_for_login_sec: int = 45,
     web_url: str = "https://gemini.google.com/app",
+    new_chat: bool = True,
+    prefer_pro_mode: bool = True,
 ) -> dict[str, Any]:
     """Drive a single Chrome CDP profile/port to query Gemini Web."""
     from playwright.async_api import async_playwright
@@ -226,6 +269,69 @@ async def _query_single_cdp_instance(
             await asyncio.sleep(0.3)
         except Exception:
             pass
+
+        # Upgrade 1: Reset to a clean New Chat if previous messages exist so context does not pollute
+        if new_chat and initial_count > 0:
+            try:
+                clicked_new = await page.evaluate(
+                    """() => {
+                        const btn = document.querySelector(
+                            'a[aria-label*="New chat" i], a[aria-label*="Cuộc trò chuyện mới" i], ' +
+                            'button[aria-label*="New chat" i], button[aria-label*="Cuộc trò chuyện mới" i], ' +
+                            '[data-test-id="new-chat-button"]'
+                        );
+                        if (btn) { btn.click(); return true; }
+                        return false;
+                    }"""
+                )
+                if not clicked_new:
+                    await page.goto(web_url, wait_until="domcontentloaded", timeout=20000)
+                await asyncio.sleep(0.8)
+                input_box = page.locator(INPUT_SELECTORS).first
+                await input_box.wait_for(state="visible", timeout=10000)
+                init_state = await page.evaluate(read_dom_state_js)
+                initial_count = int(init_state.get("count", 0))
+                initial_last_text = str(init_state.get("lastText", ""))
+            except Exception:
+                pass
+
+        # Upgrade 2: Automatically switch Gemini Web picker to Pro / Thinking mode if currently on Flash
+        if prefer_pro_mode:
+            try:
+                switched = await page.evaluate(
+                    """() => {
+                        const switcher = document.querySelector(
+                            '[data-test-id="bard-mode-menu-button"], button.input-area-switch, button[aria-label*="mode" i]'
+                        );
+                        if (!switcher) return false;
+                        const label = (switcher.innerText || '').toLowerCase();
+                        if (label.includes('flash') || label.includes('nhanh') || label.includes('fast')) {
+                            switcher.click();
+                            return true;
+                        }
+                        return false;
+                    }"""
+                )
+                if switched:
+                    await asyncio.sleep(0.4)
+                    await page.evaluate(
+                        """() => {
+                            const items = document.querySelectorAll(
+                                '[role="menuitem"], [role="option"], .mat-mdc-menu-item, button.bard-mode-list-button'
+                            );
+                            for (const item of items) {
+                                const t = (item.innerText || '').toLowerCase();
+                                if (t.includes('pro') || t.includes('thinking') || t.includes('tư duy') || t.includes('advanced')) {
+                                    item.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }"""
+                    )
+                    await asyncio.sleep(0.3)
+            except Exception:
+                pass
 
         # Fill the contenteditable rich-textarea directly (fires input/change events in Angular)
         try:
@@ -321,6 +427,8 @@ async def query_gemini_web_cdp(
     wait_for_login_sec: int = 45,
     web_url: str = "https://gemini.google.com/app",
     pool: AccountPoolManager | None = None,
+    new_chat: bool = True,
+    prefer_pro_mode: bool = True,
 ) -> dict[str, Any]:
     """Automatically input `prompt` into Gemini Web and auto-swap accounts if 5h/weekly quota is hit."""
     pool_mgr = pool or AccountPoolManager()
@@ -346,6 +454,8 @@ async def query_gemini_web_cdp(
             timeout_sec=timeout_sec,
             wait_for_login_sec=wait_for_login_sec,
             web_url=web_url,
+            new_chat=new_chat,
+            prefer_pro_mode=prefer_pro_mode,
         )
 
         est_tokens = int((res.get("antigravity_usage") or {}).get("total_tokens", 0))

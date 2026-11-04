@@ -12,3 +12,4 @@ When the user invokes `/quota-monitor` or asks to check model/account quotas:
 3. Below the table, add a 2-bullet summary highlighting:
    - Which account (`acc-1`, `acc-2`, `acc-3`) is currently active for **CLI Flash** and **Web Argon**.
    - Any model or account that has `<25%` remaining 5-hour or weekly quota (or confirm that all models are healthy).
+

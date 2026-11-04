@@ -13,6 +13,7 @@ import uuid
 
 from agy_orchestrator.account_pool import AccountPoolManager, classify_quota_window_error
 from agy_orchestrator.config import OrchestratorSettings
+from agy_orchestrator.gemini_web_cdp import extract_and_write_web_files, query_gemini_web_cdp
 from agy_orchestrator.models import ModelRegistry, TaskTier
 
 EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
@@ -471,6 +472,56 @@ class AntigravityWorkerRunner:
                         f"[AUTO-SWAP] Account `{swap_res.get('from_account')}` hit {quota_err_window} Flash quota; "
                         f"rotated Antigravity CLI to `{active_acc_id}`."
                     )
+
+                # Upgrade 3: Hands-free fallback to 3-Account Gemini Web CDP Pool for Worker Flash tasks
+                web_prompt = spec.prompt.strip()
+                if spec.output_files:
+                    file_tags_instr = "\n".join(
+                        f'<file path="{rel}">\n...full file content...\n</file>'
+                        for rel in spec.output_files
+                    )
+                    web_prompt += (
+                        "\n\n[WEB FALLBACK DELIVERABLE FORMAT]\n"
+                        "Output each requested deliverable file inside exact XML tags so the orchestrator "
+                        "can write them directly to disk:\n"
+                        f"{file_tags_instr}\n"
+                        "After the `<file>` blocks, provide a concise bullet summary."
+                    )
+                try:
+                    web_res = await query_gemini_web_cdp(
+                        prompt=web_prompt,
+                        timeout_sec=min(timeout_sec, 180),
+                        pool=self.pool,
+                        new_chat=True,
+                        prefer_pro_mode=False,
+                    )
+                    if web_res.get("status") == "SUCCESS":
+                        web_text = str(web_res.get("worker_summary") or "").strip()
+                        written_files = extract_and_write_web_files(
+                            response_text=web_text,
+                            workspace=workspace,
+                            output_files=spec.output_files,
+                        )
+                        status_str = "SUCCESS"
+                        resolved_model = f"{resolved_model}->gemini-web-cdp({web_res.get('account_id', 'web')})"
+                        active_acc_id = str(web_res.get("account_id") or active_acc_id)
+                        account_swapped = True
+                        raw_response = web_text
+                        worker_summary, was_truncated = truncate_for_manager(
+                            raw_response,
+                            max_chars=max_chars,
+                            full_output_path=full_md_path,
+                        )
+                        if was_truncated or len(raw_response) > 600:
+                            full_md_path.write_text(raw_response, encoding="utf-8")
+                            saved_path_str = str(full_md_path)
+                        git_summary = await _capture_git_summary(workspace)
+                        warnings.append(
+                            f"[WEB-CDP-FALLBACK] Antigravity CLI hit {quota_err_window} Flash quota; "
+                            f"completed task via Gemini Web CDP (`{active_acc_id}`) and wrote {len(written_files)} file(s): {written_files}."
+                        )
+                except Exception as exc:
+                    warnings.append(f"[WEB-CDP-FALLBACK-ERROR] {exc}")
         else:
             post_check = self.pool.ensure_healthy_account()
             if post_check.get("swapped"):
