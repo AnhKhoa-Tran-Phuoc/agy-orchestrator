@@ -7,7 +7,7 @@ name = "agy-orchestrator"
 version = "0.1.0"
 description = "MCP Server & CLI allowing ChatGPT / Codex to orchestrate Google Antigravity CLI models as quota-saving workers."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.11"
 authors = [
     { name = "KokaTran98", email = "kokatran98@gmail.com" }
