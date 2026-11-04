@@ -8,6 +8,7 @@ import pytest
 from agy_orchestrator.account_pool import (
     AccountPoolManager,
     classify_quota_window_error,
+    format_per_model_quota_table,
 )
 
 
@@ -56,4 +57,11 @@ def test_account_pool_5h_and_weekly_auto_swap(tmp_path: Path) -> None:
     assert acc1_after["pct_5h"] == 0.0
     # Weekly tokens on acc-1 are still tracked within the 7-day window
     assert acc1_after["tokens_weekly"] == 88_000
+
+    # Verify per-model quota report and formatted table
+    report = pool.get_per_model_quota_report(now_ts=now + 10, include_opencode_stats=False)
+    table = format_per_model_quota_table(report)
+    assert "gemini-3.8-flash-high" in table
+    assert "gemini-4-argon-high" in table
+    assert "acc-1" in table
 

@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from agy_orchestrator.account_pool import format_per_model_quota_table
 from agy_orchestrator.codex_installer import install_to_codex, uninstall_from_codex
 from agy_orchestrator.config import OrchestratorSettings
 from agy_orchestrator.gemini_web_cdp import (
@@ -222,6 +223,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-open",
         action="store_true",
         help="Register the account slots without launching Chrome windows immediately.",
+    )
+
+    # 20. quota
+    p_quota = sub.add_parser(
+        "quota",
+        help="Display per-model 5-hour & weekly quota dashboard across Antigravity CLI, Gemini Web, and OpenCode.",
+    )
+    p_quota.add_argument("--json", action="store_true", help="Output raw JSON instead of the formatted table.")
+    p_quota.add_argument(
+        "--watch",
+        type=int,
+        default=0,
+        help="Continuously refresh the quota dashboard every N seconds (e.g. --watch 5).",
     )
 
     return parser
@@ -456,12 +470,32 @@ async def _dispatch_async(args: argparse.Namespace) -> int:
                 "total_accounts": count,
                 "accounts": opened_windows,
                 "instructions": (
-                    "Mỗi tài khoản (`acc-1`, `acc-2`, ...) có 1 cửa sổ Chrome độc lập riêng biệt. "
-                    "Hãy đăng nhập từng tài khoản Google vào đúng cửa sổ Chrome của nó 1 lần duy nhất. "
-                    "`acc-1` sẽ dùng cả Argon trên Antigravity CLI lẫn Web; từ `acc-2` trở đi hệ thống tự biết chỉ chạy trên Web!"
+                    "Each account (`acc-1`, `acc-2`, ...) has its own isolated Chrome profile window. "
+                    "Sign in to each Google account once in its corresponding window."
                 ),
             }
         )
+        return 0
+
+    if args.subcommand == "quota":
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if args.watch and args.watch > 0:
+            try:
+                while True:
+                    runner.pool._load()
+                    rep = runner.pool.get_per_model_quota_report(include_opencode_stats=True)
+                    print("\033[2J\033[H", end="")
+                    print(format_per_model_quota_table(rep))
+                    print(f"\n  [Live Refresh every {args.watch}s — Press Ctrl+C to stop]")
+                    await asyncio.sleep(max(1, args.watch))
+            except KeyboardInterrupt:
+                return 0
+        rep = runner.pool.get_per_model_quota_report(include_opencode_stats=True)
+        if args.json:
+            _print_json(rep)
+        else:
+            print(format_per_model_quota_table(rep))
         return 0
 
     return 1

@@ -10,6 +10,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field
 
 from agy_orchestrator import __version__
+from agy_orchestrator.account_pool import format_per_model_quota_table
 from agy_orchestrator.boss_fallback import (
     prepare_web_handoff_bundle,
     run_boss_with_fallback,
@@ -432,6 +433,19 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
     )
     def get_account_pool_status() -> dict[str, Any]:
         return runner.pool.get_pool_status()
+
+    @mcp.tool(
+        description=(
+            "Return a comprehensive per-model quota & usage breakdown across every Antigravity CLI model "
+            "(`gemini-4-argon-*`, `gemini-3.8-flash-*`), Gemini Web (`gemini-web-pro`), and OpenCode model "
+            "(`openai/gpt-6-*`, `opencode/*-free`), including 5-hour and 7-day remaining quota percentages "
+            "and a formatted ASCII dashboard table."
+        )
+    )
+    def get_per_model_quota_report() -> dict[str, Any]:
+        report = runner.pool.get_per_model_quota_report(include_opencode_stats=True)
+        report["formatted_dashboard"] = format_per_model_quota_table(report)
+        return report
 
     @mcp.tool(
         description=(

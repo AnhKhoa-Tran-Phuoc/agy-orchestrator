@@ -31,6 +31,7 @@ MANAGED_SKILL_DIRS: tuple[str, ...] = (
     "openai-quota-shield",
     "context-compaction-guard",
     "optimal-worker-routing",
+    "quota-monitor",
 )
 
 

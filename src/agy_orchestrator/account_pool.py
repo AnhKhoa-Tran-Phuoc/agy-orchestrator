@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import time
 from typing import Any
 
@@ -18,6 +20,68 @@ DEFAULT_WEEKLY_TOKEN_LIMIT = 2_500_000
 DEFAULT_5H_RUN_LIMIT = 45
 DEFAULT_WEEKLY_RUN_LIMIT = 280
 DEFAULT_SWAP_THRESHOLD_PCT = 85.0
+
+MODEL_QUOTA_BUDGETS: dict[str, dict[str, Any]] = {
+    "gemini-4-argon-high": {
+        "role": "Boss (AGY CLI acc-1)",
+        "limit_5h_runs": 15,
+        "limit_5h_tokens": 180_000,
+        "limit_weekly_runs": 60,
+        "limit_weekly_tokens": 750_000,
+    },
+    "gemini-4-argon-medium": {
+        "role": "Boss Fallback (AGY CLI acc-1)",
+        "limit_5h_runs": 25,
+        "limit_5h_tokens": 250_000,
+        "limit_weekly_runs": 100,
+        "limit_weekly_tokens": 1_000_000,
+    },
+    "gemini-4-argon-low": {
+        "role": "Boss Fast (AGY CLI acc-1)",
+        "limit_5h_runs": 35,
+        "limit_5h_tokens": 350_000,
+        "limit_weekly_runs": 140,
+        "limit_weekly_tokens": 1_400_000,
+    },
+    "gemini-web-pro": {
+        "role": "Boss Web CDP (acc-1/2/3 Pool)",
+        "limit_5h_runs": 40,
+        "limit_5h_tokens": 400_000,
+        "limit_weekly_runs": 250,
+        "limit_weekly_tokens": 2_500_000,
+    },
+    "gemini-3.8-flash-high": {
+        "role": "Worker Heavy (AGY CLI 3-Acc)",
+        "limit_5h_runs": 45,
+        "limit_5h_tokens": 400_000,
+        "limit_weekly_runs": 280,
+        "limit_weekly_tokens": 2_500_000,
+    },
+    "gemini-3.8-flash-medium": {
+        "role": "Worker Standard (AGY CLI 3-Acc)",
+        "limit_5h_runs": 65,
+        "limit_5h_tokens": 600_000,
+        "limit_weekly_runs": 400,
+        "limit_weekly_tokens": 3_500_000,
+    },
+    "gemini-3.8-flash-low": {
+        "role": "Worker Fast (AGY CLI 3-Acc)",
+        "limit_5h_runs": 90,
+        "limit_5h_tokens": 800_000,
+        "limit_weekly_runs": 600,
+        "limit_weekly_tokens": 5_000_000,
+    },
+}
+
+OPENCODE_TRACKED_MODELS: dict[str, str] = {
+    "openai/gpt-6-astra": "Boss Primary (1-Acc MAX=high)",
+    "openai/gpt-6.1-sol": "Boss Reviewer (1-Acc MAX=high)",
+    "opencode/deepseek-v4.1-flash-free": "Worker Code/Test ($0 Free)",
+    "opencode/nemotron-3.5-super-vl-free": "Worker VL/Pre-Review ($0 Free)",
+    "opencode/nemotron-3.5-lightning-free": "Worker Scout/Runner ($0 Free)",
+    "opencode/mimo-v2.6-flash-free": "Worker UI/Config ($0 Free)",
+    "opencode/glm-5.3-flash-free": "Worker Docs/State ($0 Free)",
+}
 
 
 def default_pool_file() -> Path:
@@ -515,3 +579,294 @@ class AccountPoolManager:
             "accounts": accounts_metrics,
             "recent_swaps": self.swap_events[-10:],
         }
+
+    def get_per_model_quota_report(
+        self,
+        now_ts: float | None = None,
+        include_opencode_stats: bool = True,
+    ) -> dict[str, Any]:
+        """Compute a unified per-model quota & usage breakdown across Antigravity CLI, Gemini Web, and OpenCode."""
+        now = now_ts if now_ts is not None else time.time()
+        cutoff_5h = now - WINDOW_5H_SECONDS
+        total_accs = max(1, len(self.accounts))
+
+        # Aggregate usage across all accounts by model
+        usage_by_model: dict[str, dict[str, Any]] = {}
+        for model_id in MODEL_QUOTA_BUDGETS:
+            usage_by_model[model_id] = {
+                "runs_5h": 0,
+                "tokens_5h": 0,
+                "runs_weekly": 0,
+                "tokens_weekly": 0,
+                "oldest_ts_5h": None,
+                "by_account": {},
+            }
+
+        for acc in self.accounts.values():
+            acc.prune_history(now)
+            for rec in acc.usage_history:
+                m_id = str(rec.get("model", "unknown"))
+                ts = float(rec.get("ts", 0.0))
+                tok = int(rec.get("tokens", 0))
+                bucket = usage_by_model.setdefault(
+                    m_id,
+                    {
+                        "runs_5h": 0,
+                        "tokens_5h": 0,
+                        "runs_weekly": 0,
+                        "tokens_weekly": 0,
+                        "oldest_ts_5h": None,
+                        "by_account": {},
+                    },
+                )
+                bucket["runs_weekly"] += 1
+                bucket["tokens_weekly"] += tok
+                acc_bucket = bucket["by_account"].setdefault(
+                    acc.account_id, {"runs_5h": 0, "tokens_5h": 0, "runs_weekly": 0, "tokens_weekly": 0}
+                )
+                acc_bucket["runs_weekly"] += 1
+                acc_bucket["tokens_weekly"] += tok
+
+                if ts >= cutoff_5h:
+                    bucket["runs_5h"] += 1
+                    bucket["tokens_5h"] += tok
+                    acc_bucket["runs_5h"] += 1
+                    acc_bucket["tokens_5h"] += tok
+                    if bucket["oldest_ts_5h"] is None or ts < bucket["oldest_ts_5h"]:
+                        bucket["oldest_ts_5h"] = ts
+
+        agy_and_web_models: list[dict[str, Any]] = []
+        for model_id, bucket in usage_by_model.items():
+            budget = MODEL_QUOTA_BUDGETS.get(
+                model_id,
+                {
+                    "role": "Worker/Custom",
+                    "limit_5h_runs": DEFAULT_5H_RUN_LIMIT,
+                    "limit_5h_tokens": DEFAULT_5H_TOKEN_LIMIT,
+                    "limit_weekly_runs": DEFAULT_WEEKLY_RUN_LIMIT,
+                    "limit_weekly_tokens": DEFAULT_WEEKLY_TOKEN_LIMIT,
+                },
+            )
+            # Multi-account multiplier: Web and Flash models scale across all registered accounts; CLI Argon is on acc-1 only
+            is_cli_argon = model_id.startswith("gemini-4-argon")
+            multiplier = 1 if is_cli_argon else total_accs
+
+            lim_5h_runs = int(budget["limit_5h_runs"]) * multiplier
+            lim_5h_tok = int(budget["limit_5h_tokens"]) * multiplier
+            lim_wk_runs = int(budget["limit_weekly_runs"]) * multiplier
+            lim_wk_tok = int(budget["limit_weekly_tokens"]) * multiplier
+
+            used_5h_pct = round(
+                max(
+                    (bucket["runs_5h"] / max(1, lim_5h_runs)) * 100.0,
+                    (bucket["tokens_5h"] / max(1, lim_5h_tok)) * 100.0,
+                ),
+                2,
+            )
+            used_wk_pct = round(
+                max(
+                    (bucket["runs_weekly"] / max(1, lim_wk_runs)) * 100.0,
+                    (bucket["tokens_weekly"] / max(1, lim_wk_tok)) * 100.0,
+                ),
+                2,
+            )
+            rem_5h_pct = round(max(0.0, 100.0 - used_5h_pct), 2)
+            rem_wk_pct = round(max(0.0, 100.0 - used_wk_pct), 2)
+
+            reset_5h_min = 0.0
+            if bucket["oldest_ts_5h"] is not None:
+                reset_5h_min = round(
+                    max(0.0, (float(bucket["oldest_ts_5h"]) + WINDOW_5H_SECONDS - now) / 60.0),
+                    1,
+                )
+
+            agy_and_web_models.append(
+                {
+                    "model": model_id,
+                    "role": budget["role"],
+                    "pool_accounts_backing": multiplier,
+                    "runs_5h": bucket["runs_5h"],
+                    "limit_5h_runs": lim_5h_runs,
+                    "tokens_5h": bucket["tokens_5h"],
+                    "limit_5h_tokens": lim_5h_tok,
+                    "used_5h_pct": used_5h_pct,
+                    "remaining_5h_pct": rem_5h_pct,
+                    "window_5h_resets_in_minutes": reset_5h_min,
+                    "runs_weekly": bucket["runs_weekly"],
+                    "limit_weekly_runs": lim_wk_runs,
+                    "tokens_weekly": bucket["tokens_weekly"],
+                    "limit_weekly_tokens": lim_wk_tok,
+                    "used_weekly_pct": used_wk_pct,
+                    "remaining_weekly_pct": rem_wk_pct,
+                    "by_account": bucket["by_account"],
+                }
+            )
+
+        opencode_models = _fetch_opencode_model_stats() if include_opencode_stats else []
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "pool_status": self.get_pool_status(now),
+            "antigravity_and_web_models": agy_and_web_models,
+            "opencode_models": opencode_models,
+        }
+
+
+def _find_opencode_cli() -> str | None:
+    found = shutil.which("opencode") or shutil.which("opencode-cli")
+    if found:
+        return found
+    if os.name == "nt":
+        roaming = os.environ.get("APPDATA", "")
+        candidate = Path(roaming) / "ai.opencode.desktop" / "cli" / "2.2.5-x64" / "opencode-cli.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _fetch_opencode_model_stats() -> list[dict[str, Any]]:
+    """Query `opencode stats --models --cost --json --days 7` and merge with tracked OpenCode models."""
+    cli_bin = _find_opencode_cli()
+    raw_models: dict[str, dict[str, Any]] = {}
+    if cli_bin:
+        try:
+            proc = subprocess.run(
+                [cli_bin, "stats", "--models", "--cost", "--json", "--days", "7"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=6,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                parsed = json.loads(proc.stdout)
+                for entry in parsed.get("models", []):
+                    m_info = entry.get("model") or {}
+                    prov = str(m_info.get("providerID", ""))
+                    m_id = str(m_info.get("id", ""))
+                    full_id = f"{prov}/{m_id}" if prov else m_id
+                    tok = entry.get("tokens") or {}
+                    cache = tok.get("cache") or {}
+                    raw_models[full_id] = {
+                        "steps_7d": int(entry.get("steps", 0)),
+                        "input_tokens_7d": int(tok.get("input", 0)),
+                        "output_tokens_7d": int(tok.get("output", 0)),
+                        "reasoning_tokens_7d": int(tok.get("reasoning", 0)),
+                        "cache_read_tokens_7d": int(cache.get("read", 0)),
+                        "cost_usd_7d": float(entry.get("cost", 0.0)),
+                    }
+        except Exception:
+            pass
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for full_id, role_desc in OPENCODE_TRACKED_MODELS.items():
+        seen.add(full_id)
+        stats = raw_models.get(
+            full_id,
+            {
+                "steps_7d": 0,
+                "input_tokens_7d": 0,
+                "output_tokens_7d": 0,
+                "reasoning_tokens_7d": 0,
+                "cache_read_tokens_7d": 0,
+                "cost_usd_7d": 0.0,
+            },
+        )
+        is_free = full_id.startswith("opencode/")
+        results.append(
+            {
+                "model": full_id,
+                "role": role_desc,
+                "quota_policy": "UNLIMITED ($0 Free)" if is_free else "1-Account Shield (MAX=high)",
+                **stats,
+            }
+        )
+
+    for extra_id, stats in raw_models.items():
+        if extra_id not in seen:
+            is_free = extra_id.startswith("opencode/")
+            results.append(
+                {
+                    "model": extra_id,
+                    "role": "OpenCode Active Model",
+                    "quota_policy": "UNLIMITED ($0 Free)" if is_free else "Standard Quota",
+                    **stats,
+                }
+            )
+    return results
+
+
+def _bar(remaining_pct: float, width: int = 10) -> str:
+    clamped = max(0.0, min(100.0, remaining_pct))
+    filled = int(round((clamped / 100.0) * width))
+    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+
+def format_per_model_quota_table(report: dict[str, Any]) -> str:
+    """Format the per-model quota report as a clean ASCII dashboard table for CLI & OpenCode chat."""
+    lines: list[str] = []
+    pool = report.get("pool_status") or {}
+    lines.append("==========================================================================================")
+    lines.append("  AGY-ORCHESTRATOR — PER-MODEL & MULTI-ACCOUNT QUOTA MONITOR (5H & WEEKLY WINDOWS)")
+    lines.append("==========================================================================================")
+    lines.append(
+        f"  Active CLI Flash Account : {pool.get('active_cli_flash_account_id', 'acc-1')}  |  "
+        f"Active Web Argon Account : {pool.get('active_web_argon_account_id', 'acc-1')}  |  "
+        f"Auto-Swap Threshold : {pool.get('swap_threshold_pct', 85.0)}%"
+    )
+    lines.append("------------------------------------------------------------------------------------------")
+    lines.append("  1. GOOGLE ANTIGRAVITY CLI & GEMINI WEB MODELS (5-HOUR & WEEKLY QUOTA REMAINING)")
+    lines.append("------------------------------------------------------------------------------------------")
+    lines.append(
+        f"  {'Model ID':<25} {'Role':<29} {'5h Quota Left':<20} {'Weekly Left':<18} {'5h Runs'}"
+    )
+    lines.append("  " + ("-" * 86))
+
+    for m in report.get("antigravity_and_web_models", []):
+        rem_5h = float(m.get("remaining_5h_pct", 100.0))
+        rem_wk = float(m.get("remaining_weekly_pct", 100.0))
+        bar_5h = f"{_bar(rem_5h, 8)} {rem_5h:>5.1f}%"
+        bar_wk = f"{_bar(rem_wk, 6)} {rem_wk:>5.1f}%"
+        runs_str = f"{m.get('runs_5h', 0)}/{m.get('limit_5h_runs', 0)}"
+        lines.append(
+            f"  {str(m['model']):<25} {str(m['role']):<29} {bar_5h:<20} {bar_wk:<18} {runs_str}"
+        )
+
+    lines.append("")
+    lines.append("------------------------------------------------------------------------------------------")
+    lines.append("  2. GOOGLE ACCOUNT POOL STATUS (acc-1, acc-2, acc-3, ...)")
+    lines.append("------------------------------------------------------------------------------------------")
+    lines.append(
+        f"  {'Acc ID':<8} {'CDP Port':<9} {'Argon Mode':<17} {'5h Quota Left':<20} {'Weekly Left':<18} {'Status'}"
+    )
+    lines.append("  " + ("-" * 86))
+    for acc in pool.get("accounts", []):
+        rem_5h = round(max(0.0, 100.0 - float(acc.get("pct_5h", 0.0))), 1)
+        rem_wk = round(max(0.0, 100.0 - float(acc.get("pct_weekly", 0.0))), 1)
+        bar_5h = f"{_bar(rem_5h, 8)} {rem_5h:>5.1f}%"
+        bar_wk = f"{_bar(rem_wk, 6)} {rem_wk:>5.1f}%"
+        if acc.get("in_cooldown"):
+            status_str = f"COOLDOWN ({acc.get('cooldown_remaining_minutes')}m)"
+        else:
+            status_str = "READY (CLI+Web)" if acc.get("argon_cli_ready") else "READY (Web+Flash)"
+        lines.append(
+            f"  {str(acc['account_id']):<8} {str(acc['cdp_port']):<9} "
+            f"{str(acc.get('argon_routing', '')):<17} {bar_5h:<20} {bar_wk:<18} {status_str}"
+        )
+
+    lines.append("")
+    lines.append("------------------------------------------------------------------------------------------")
+    lines.append("  3. OPENCODE BOSS & ZERO-COST WORKER MODELS (7-DAY LIVE TELEMETRY)")
+    lines.append("------------------------------------------------------------------------------------------")
+    lines.append(
+        f"  {'Model ID':<36} {'Quota Policy':<28} {'Steps':<7} {'Input Tok':<11} {'Out/Rsn Tok'}"
+    )
+    lines.append("  " + ("-" * 86))
+    for oc in report.get("opencode_models", []):
+        out_rsn = int(oc.get("output_tokens_7d", 0)) + int(oc.get("reasoning_tokens_7d", 0))
+        lines.append(
+            f"  {str(oc['model']):<36} {str(oc['quota_policy']):<28} "
+            f"{int(oc.get('steps_7d', 0)):<7} {int(oc.get('input_tokens_7d', 0)):<11} {out_rsn}"
+        )
+    lines.append("==========================================================================================")
+    return "\n".join(lines)
