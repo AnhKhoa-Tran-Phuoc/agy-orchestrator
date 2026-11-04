@@ -1,4 +1,4 @@
-"""MCP Server exposing Antigravity CLI workers and low-token Manager inspection tools."""
+"""MCP Server exposing Antigravity CLI workers, Gemini 4 Argon Boss review, and low-token inspection tools."""
 
 from __future__ import annotations
 
@@ -35,13 +35,8 @@ MANAGER_SYSTEM_INSTRUCTIONS = """\
 You are connected to `antigravity_workers`, a Manager-Worker orchestration bridge backed by Google Antigravity CLI (`agy`).
 
 To conserve your own context window and message quota:
-1. Act as the Manager, Architect, and Quality Inspector. Delegate coding, writing, documentation, boilerplate, and refactoring tasks to `delegate_task` or `delegate_parallel_tasks`.
-2. Pick the most quota-efficient `tier`:
-   - `trivial`: formatting, renaming, conversions, reading/summarizing huge files (uses Flash Low).
-   - `writing`: articles, docs, READMEs, tutorials, Vietnamese/English copy (uses Flash High).
-   - `coding`: multi-file features, unit tests, standard refactors (uses Argon Medium / Sonnet Medium).
-   - `complex`: difficult bugs, concurrency, intricate algorithms (uses Argon High / Sonnet High / Opus).
-   Or pass an explicit `model` ID from `list_worker_models`.
+1. Act as the Boss / Manager / Code Reviewer. Delegate coding, writing, documentation, boilerplate, and refactoring tasks to `delegate_flash_worker`, `delegate_task`, `delegate_parallel_tasks`, or OpenCode free subagents.
+2. Consult `argon_boss_review` (powered by Gemini 4 Argon in read-only plan mode) whenever you want a second Senior Architect plan or strict code review verdict (`APPROVED` / `CHANGES_REQUESTED`).
 3. Audit deliverables using `inspect_workspace_changes`, `read_file_excerpt`, and `run_verification_check` rather than loading entire large files into context.
 4. When changes need fixes after inspection, call `continue_worker_session` with the worker's `conversation_id` so Antigravity reuses its cached session context.
 """
@@ -105,6 +100,104 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
             },
             "available_models": [m.to_dict() for m in models],
         }
+
+    @mcp.tool(
+        description=(
+            "Consult Gemini 4 Argon ('gemini-4-argon-high' or 'gemini-4-argon-medium') as the Senior Architect "
+            "and Code Reviewer Boss (runs in read-only 'plan' mode). Use review_type='plan' to design task "
+            "breakdowns for workers, or review_type='code_review' to audit diffs and approve/reject worker code."
+        )
+    )
+    async def argon_boss_review(
+        task_context: str,
+        review_type: Literal["plan", "code_review", "architecture"] = "code_review",
+        workspace_dir: str | None = None,
+        file_paths: list[str] | None = None,
+        argon_level: Literal["high", "medium", "low"] = "high",
+        conversation_id: str | None = None,
+        timeout_sec: int = 300,
+    ) -> dict[str, Any]:
+        target_ws = cfg.resolve_workspace(workspace_dir)
+        explicit_model = f"gemini-4-argon-{argon_level}"
+        files_clause = ""
+        if file_paths:
+            files_clause = "\nFocus files: " + ", ".join(f"`{p}`" for p in file_paths)
+
+        if review_type in ("plan", "architecture"):
+            boss_prompt = (
+                "[ROLE: GEMINI 4 ARGON — CHIEF ARCHITECT & BOSS]\n"
+                "Do NOT write implementation files yourself. Analyze the workspace and the request below, "
+                "then produce:\n"
+                "1. Brief Architecture & Design Decisions.\n"
+                "2. Numbered Worker Task Breakdown assigning each task to the right worker:\n"
+                "   - `worker-gemini-flash` (Gemini 3.8 Flash): multi-file coding, refactoring, long docs\n"
+                "   - `worker-deepseek` (OpenCode Free): isolated Python/TS/JS modules & unit tests\n"
+                "   - `worker-glm` (OpenCode Free): README, Vietnamese/English documentation, copywriting\n"
+                "   - `worker-mimo` (OpenCode Free): UI components, boilerplate, JSON/YAML/config files\n"
+                "   - `worker-nemotron` (OpenCode Free): test execution, codebase search & verification\n"
+                "3. Explicit acceptance criteria & verification commands.\n\n"
+                f"Request:\n{task_context}{files_clause}"
+            )
+        else:
+            diff_snapshot = await _inspect_changes(
+                workspace_dir=target_ws,
+                include_patch=True,
+                max_chars=2500,
+            )
+            boss_prompt = (
+                "[ROLE: GEMINI 4 ARGON — STRICT CODE REVIEWER BOSS]\n"
+                "Do NOT modify files yourself. Audit the worker's implementation against the requirements.\n"
+                "Start your response with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`.\n"
+                "List any bugs, edge cases, security issues, or style violations with exact file/line references "
+                "and concise fix instructions for the workers.\n\n"
+                f"Task / Requirements:\n{task_context}{files_clause}\n\n"
+                f"Current Workspace Changes Snapshot:\n{diff_snapshot}"
+            )
+
+        spec = WorkerTaskSpec(
+            prompt=boss_prompt,
+            workspace_dir=target_ws,
+            tier="complex",
+            model=explicit_model,
+            mode="plan",
+            conversation_id=conversation_id,
+            concise_report=False,
+            timeout_sec=timeout_sec,
+            max_summary_chars=3200,
+        )
+        result = await runner.run_task(spec)
+        return result.to_compact_dict()
+
+    @mcp.tool(
+        description=(
+            "Delegate coding, writing, or refactoring work specifically to a Gemini 3.8 Flash worker "
+            "('gemini-3.8-flash-high', 'gemini-3.8-flash-medium', or 'gemini-3.8-flash-low') in 'accept-edits' mode."
+        )
+    )
+    async def delegate_flash_worker(
+        prompt: str,
+        workspace_dir: str | None = None,
+        flash_level: Literal["high", "medium", "low"] = "high",
+        output_files: list[str] | None = None,
+        conversation_id: str | None = None,
+        allow_shell: bool = False,
+        timeout_sec: int = 300,
+    ) -> dict[str, Any]:
+        explicit_model = f"gemini-3.8-flash-{flash_level}"
+        tier: TaskTier = "trivial" if flash_level == "low" else "writing"
+        spec = WorkerTaskSpec(
+            prompt=prompt,
+            workspace_dir=workspace_dir,
+            tier=tier,
+            model=explicit_model,
+            output_files=output_files,
+            conversation_id=conversation_id,
+            mode="accept-edits",
+            allow_shell=allow_shell,
+            timeout_sec=timeout_sec,
+        )
+        result = await runner.run_task(spec)
+        return result.to_compact_dict()
 
     @mcp.tool(
         description=(
@@ -272,7 +365,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
     @mcp.prompt(
         name="manager_mode",
         title="Manager Mode (Delegate to Antigravity Workers)",
-        description="Instruct ChatGPT/Codex to plan, delegate execution to Antigravity models, and verify changes.",
+        description="Instruct ChatGPT/Codex/OpenCode to plan, delegate execution to workers, and verify changes.",
     )
     def manager_mode(goal: str, workspace_dir: str = "") -> str:
         ws_clause = f"\nTarget workspace directory: `{workspace_dir}`" if workspace_dir else ""
@@ -280,12 +373,11 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
             f"Act strictly as the Engineering/Content Manager for the following goal:{ws_clause}\n\n"
             f"Goal:\n{goal}\n\n"
             "Instructions:\n"
-            "1. Outline a brief task breakdown and assign each task an Antigravity `tier` "
-            "(`trivial`, `writing`, `coding`, or `complex`).\n"
-            "2. Delegate ALL heavy file writing, coding, and prose generation via `delegate_task` "
-            "or `delegate_parallel_tasks`—do NOT write full files yourself.\n"
-            "3. Inspect deliverables with `inspect_workspace_changes` / `read_file_excerpt` and "
-            "validate with `run_verification_check` where applicable.\n"
+            "1. Outline a brief task breakdown (optionally consulting `argon_boss_review(review_type='plan')`).\n"
+            "2. Delegate ALL heavy file writing, coding, and prose generation via `delegate_flash_worker`, "
+            "`delegate_parallel_tasks`, or OpenCode free worker subagents—do NOT write full files yourself.\n"
+            "3. Inspect deliverables with `inspect_workspace_changes` / `read_file_excerpt`, validate with "
+            "`run_verification_check`, and audit with `argon_boss_review(review_type='code_review')`.\n"
             "4. If anything needs adjustment, call `continue_worker_session` with its `conversation_id`.\n"
             "5. Report final results and `get_quota_savings_report` concisely."
         )
@@ -294,7 +386,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
 
 
 def run_stdio() -> None:
-    """Entrypoint for stdio MCP transport (used by ChatGPT Desktop & Codex CLI)."""
+    """Entrypoint for stdio MCP transport (used by ChatGPT Desktop, Codex CLI, and OpenCode)."""
     server = create_mcp_server()
     server.run(transport="stdio")
 

@@ -1,4 +1,4 @@
-"""Command-line interface (`agy-orch`) for terminal delegation, inspection, and MCP setup."""
+"""Command-line interface (`agy-orch`) for terminal delegation, inspection, and MCP/OpenCode setup."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ from agy_orchestrator.inspector import (
 )
 from agy_orchestrator.mcp_server import run_http, run_stdio
 from agy_orchestrator.models import TIER_DESCRIPTIONS, VALID_TIERS, ModelRegistry
+from agy_orchestrator.opencode_installer import (
+    install_to_opencode,
+    uninstall_from_opencode,
+)
 from agy_orchestrator.runner import AntigravityWorkerRunner, WorkerTaskSpec
 
 
@@ -30,7 +34,7 @@ def _print_json(data: Any) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agy-orch",
-        description="Orchestrate Google Antigravity CLI models as quota-saving workers for ChatGPT / Codex.",
+        description="Orchestrate Google Antigravity CLI & Free OpenCode models as quota-saving workers.",
     )
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
@@ -119,6 +123,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove `antigravity_workers` MCP configuration and skill from `~/.codex`.",
     )
     p_uninst.add_argument("--codex-home", default=None, help="Custom `.codex` directory path.")
+
+    # 11. install-opencode
+    p_oc_inst = sub.add_parser(
+        "install-opencode",
+        help="Install Boss (GPT + Gemini 4 Argon) and Worker (Free OpenCode + Gemini 3.8 Flash) agents into OpenCode.",
+    )
+    p_oc_inst.add_argument(
+        "--target-dir",
+        default=None,
+        help="Custom OpenCode config or project directory (defaults to `~/.config/opencode`).",
+    )
+    p_oc_inst.add_argument(
+        "--project",
+        action="store_true",
+        help="Install into a project directory (`<target-dir>/opencode.json` + `.opencode/agents/`) instead of global.",
+    )
+    p_oc_inst.add_argument("--workspace", default=None, help="Optional default workspace path for Antigravity workers.")
+    p_oc_inst.add_argument("--dry-run", action="store_true", help="Preview installation without writing files.")
+
+    # 12. uninstall-opencode
+    p_oc_uninst = sub.add_parser(
+        "uninstall-opencode",
+        help="Remove managed Boss/Worker agents and `antigravity_workers` MCP server from OpenCode.",
+    )
+    p_oc_uninst.add_argument("--target-dir", default=None, help="Custom OpenCode config or project directory.")
+    p_oc_uninst.add_argument("--project", action="store_true", help="Uninstall from project directory.")
 
     return parser
 
@@ -216,6 +246,24 @@ async def _dispatch_async(args: argparse.Namespace) -> int:
     if args.subcommand == "uninstall-codex":
         codex_home = Path(args.codex_home) if args.codex_home else None
         _print_json(uninstall_from_codex(codex_home=codex_home))
+        return 0
+
+    if args.subcommand == "install-opencode":
+        target_dir = Path(args.target_dir) if args.target_dir else None
+        default_ws = Path(args.workspace) if args.workspace else None
+        info = install_to_opencode(
+            target_dir=target_dir,
+            is_project=args.project,
+            agy_bin=settings.agy_bin,
+            default_workspace=default_ws,
+            dry_run=args.dry_run,
+        )
+        _print_json(info)
+        return 0
+
+    if args.subcommand == "uninstall-opencode":
+        target_dir = Path(args.target_dir) if args.target_dir else None
+        _print_json(uninstall_from_opencode(target_dir=target_dir, is_project=args.project))
         return 0
 
     return 1
