@@ -12,6 +12,8 @@ import time
 from typing import Any
 import urllib.request
 
+from agy_orchestrator.account_pool import AccountPoolManager, classify_quota_window_error
+
 INPUT_SELECTORS = (
     'rich-textarea div[contenteditable="true"], '
     'div.ql-editor[contenteditable="true"], '
@@ -140,18 +142,24 @@ async def ensure_cdp_browser_running(
     )
 
 
-async def query_gemini_web_cdp(
+async def _query_single_cdp_instance(
     prompt: str,
-    cdp_port: int = 9222,
+    cdp_port: int,
+    profile_dir: Path | None,
+    account_id: str,
     timeout_sec: int = 180,
     wait_for_login_sec: int = 45,
     web_url: str = "https://gemini.google.com/app",
 ) -> dict[str, Any]:
-    """Automatically input `prompt` into Gemini Web (`gemini.google.com/app`) and extract the response."""
+    """Drive a single Chrome CDP profile/port to query Gemini Web."""
     from playwright.async_api import async_playwright
 
     started = time.perf_counter()
-    endpoint = await ensure_cdp_browser_running(cdp_port=cdp_port, start_url=web_url)
+    endpoint = await ensure_cdp_browser_running(
+        cdp_port=cdp_port,
+        profile_dir=profile_dir,
+        start_url=web_url,
+    )
 
     async with async_playwright() as pw:
         browser = await pw.chromium.connect_over_cdp(endpoint)
@@ -177,11 +185,13 @@ async def query_gemini_web_cdp(
         except Exception:
             return {
                 "status": "LOGIN_REQUIRED",
+                "account_id": account_id,
+                "cdp_port": cdp_port,
                 "model_used": "gemini-web-pro",
                 "web_url": page.url,
                 "worker_summary": (
-                    "Cửa sổ Chrome Gemini Web đã mở nhưng chưa đăng nhập tài khoản Google Pro. "
-                    "Bạn chỉ cần đăng nhập 1 lần duy nhất trên cửa sổ Chrome đó (session sẽ được lưu vĩnh viễn), "
+                    f"Cửa sổ Chrome Gemini Web cho tài khoản `{account_id}` (port {cdp_port}) đã mở nhưng chưa đăng nhập. "
+                    "Bạn chỉ cần đăng nhập 1 lần duy nhất trên cửa sổ Chrome đó (session được lưu vĩnh viễn), "
                     "sau đó chạy lại lệnh là hệ thống sẽ tự động nhập và lấy kết quả 100%."
                 ),
             }
@@ -246,10 +256,12 @@ async def query_gemini_web_cdp(
                     return {
                         "status": "SUCCESS",
                         "source": "gemini_web_cdp_automation",
+                        "account_id": account_id,
+                        "cdp_port": cdp_port,
                         "model_used": "gemini-web-pro",
                         "duration_seconds": elapsed,
                         "worker_summary": current_text,
-                        "antigravity_usage": {"total_tokens": 0},
+                        "antigravity_usage": {"total_tokens": max(100, (len(prompt) + len(current_text)) // 4)},
                     }
             else:
                 last_text = current_text
@@ -260,16 +272,81 @@ async def query_gemini_web_cdp(
             return {
                 "status": "SUCCESS",
                 "source": "gemini_web_cdp_automation_partial",
+                "account_id": account_id,
+                "cdp_port": cdp_port,
                 "model_used": "gemini-web-pro",
                 "duration_seconds": elapsed,
                 "worker_summary": last_text,
-                "antigravity_usage": {"total_tokens": 0},
+                "antigravity_usage": {"total_tokens": max(100, (len(prompt) + len(last_text)) // 4)},
             }
 
         return {
             "status": "TIMEOUT",
             "source": "gemini_web_cdp_automation",
+            "account_id": account_id,
+            "cdp_port": cdp_port,
             "model_used": "gemini-web-pro",
             "duration_seconds": elapsed,
             "worker_summary": f"Timed out after {timeout_sec}s waiting for Gemini Web response.",
         }
+
+
+async def query_gemini_web_cdp(
+    prompt: str,
+    cdp_port: int | None = None,
+    timeout_sec: int = 180,
+    wait_for_login_sec: int = 45,
+    web_url: str = "https://gemini.google.com/app",
+    pool: AccountPoolManager | None = None,
+) -> dict[str, Any]:
+    """Automatically input `prompt` into Gemini Web and auto-swap accounts if 5h/weekly quota is hit."""
+    pool_mgr = pool or AccountPoolManager()
+    ensure_res = pool_mgr.ensure_healthy_account()
+    attempted_accounts: list[str] = []
+    max_attempts = max(1, len(pool_mgr.accounts))
+
+    for attempt in range(max_attempts):
+        active_acc = pool_mgr.get_active_account()
+        attempted_accounts.append(active_acc.account_id)
+        port_to_use = cdp_port if (cdp_port is not None and attempt == 0) else active_acc.cdp_port
+        prof_dir = Path(active_acc.chrome_profile_dir) if active_acc.chrome_profile_dir else None
+
+        res = await _query_single_cdp_instance(
+            prompt=prompt,
+            cdp_port=port_to_use,
+            profile_dir=prof_dir,
+            account_id=active_acc.account_id,
+            timeout_sec=timeout_sec,
+            wait_for_login_sec=wait_for_login_sec,
+            web_url=web_url,
+        )
+
+        est_tokens = int((res.get("antigravity_usage") or {}).get("total_tokens", 0))
+        if est_tokens > 0:
+            pool_mgr.record_usage(
+                tokens=est_tokens,
+                model="gemini-web-pro",
+                account_id=active_acc.account_id,
+            )
+
+        quota_window = classify_quota_window_error(str(res.get("worker_summary", "")))
+        if res.get("status") == "SUCCESS" and quota_window is None:
+            if ensure_res.get("swapped") or attempt > 0:
+                res["account_swapped"] = True
+                res["attempted_accounts"] = attempted_accounts
+            return res
+
+        # If quota error on web or login required and we have more accounts in pool, rotate!
+        if quota_window is not None:
+            pool_mgr.mark_account_exhausted(
+                window_type=quota_window,
+                account_id=active_acc.account_id,
+            )
+        if attempt + 1 < max_attempts:
+            pool_mgr.swap_to_next_account(reason=f"web_{quota_window or res.get('status', 'fail')}")
+        else:
+            res["attempted_accounts"] = attempted_accounts
+            return res
+
+    return res
+

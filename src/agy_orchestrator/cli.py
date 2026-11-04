@@ -168,8 +168,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Hands-free auto-input prompt and auto-extract output from https://gemini.google.com/app via CDP.",
     )
     p_wask.add_argument("prompt", help="Prompt to automatically input into Gemini Web.")
-    p_wask.add_argument("--port", type=int, default=9222, help="Chrome remote debugging port (default: 9222).")
+    p_wask.add_argument("--port", type=int, default=None, help="Chrome remote debugging port (defaults to active account port).")
     p_wask.add_argument("--timeout", type=int, default=180, help="Response timeout in seconds.")
+
+    # 15. account-status
+    sub.add_parser(
+        "account-status",
+        help="Show 5-hour and weekly quota usage, cooldown status, and active account in the rotation pool.",
+    )
+
+    # 16. account-add
+    p_aadd = sub.add_parser(
+        "account-add",
+        help="Register a Google account (e.g. acc-2, acc-3) into the automatic 5h/weekly quota swap pool.",
+    )
+    p_aadd.add_argument("account_id", help="Short account identifier (e.g. acc-1, acc-2, acc-3).")
+    p_aadd.add_argument("--email", default="", help="Optional Google account email label.")
+    p_aadd.add_argument("--port", type=int, default=None, help="Dedicated Chrome CDP port (auto-assigned if omitted).")
+    p_aadd.add_argument("--limit-5h", type=int, default=400000, help="5-hour rolling token threshold.")
+    p_aadd.add_argument("--limit-weekly", type=int, default=2500000, help="7-day weekly token threshold.")
+
+    # 17. account-swap
+    p_aswap = sub.add_parser(
+        "account-swap",
+        help="Swap the active Google account to the next healthy account in the pool.",
+    )
+    p_aswap.add_argument("--to", default=None, help="Optional target account_id to swap to.")
+    p_aswap.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Also open the target account's dedicated Chrome profile window.",
+    )
+
+    # 18. account-login
+    p_alogin = sub.add_parser(
+        "account-login",
+        help="Open the dedicated Chrome profile for a specific account_id to sign in once.",
+    )
+    p_alogin.add_argument("account_id", help="Account identifier (e.g. acc-1, acc-2).")
 
     return parser
 
@@ -305,9 +341,70 @@ async def _dispatch_async(args: argparse.Namespace) -> int:
             prompt=args.prompt,
             cdp_port=args.port,
             timeout_sec=args.timeout,
+            pool=runner.pool,
         )
         _print_json(res)
         return 0 if res.get("status") == "SUCCESS" else 1
+
+    if args.subcommand == "account-status":
+        _print_json(runner.pool.get_pool_status())
+        return 0
+
+    if args.subcommand == "account-add":
+        acc = runner.pool.add_or_update_account(
+            account_id=args.account_id,
+            email=args.email,
+            cdp_port=args.port,
+            limit_5h_tokens=args.limit_5h,
+            limit_weekly_tokens=args.limit_weekly,
+        )
+        _print_json(
+            {
+                "status": "ACCOUNT_REGISTERED",
+                "account": acc.compute_window_metrics(),
+                "pool_status": runner.pool.get_pool_status(),
+            }
+        )
+        return 0
+
+    if args.subcommand == "account-swap":
+        swap_res = runner.pool.swap_to_next_account(
+            target_account_id=args.to,
+            reason="cli_account_swap",
+        )
+        if args.open_browser:
+            active_acc = runner.pool.get_active_account()
+            endpoint = await ensure_cdp_browser_running(
+                cdp_port=active_acc.cdp_port,
+                profile_dir=Path(active_acc.chrome_profile_dir),
+            )
+            swap_res["cdp_endpoint"] = endpoint
+        _print_json(swap_res)
+        return 0
+
+    if args.subcommand == "account-login":
+        acc = runner.pool.accounts.get(args.account_id)
+        if acc is None:
+            acc = runner.pool.add_or_update_account(account_id=args.account_id)
+        endpoint = await ensure_cdp_browser_running(
+            cdp_port=acc.cdp_port,
+            profile_dir=Path(acc.chrome_profile_dir),
+        )
+        _print_json(
+            {
+                "status": "ACCOUNT_CHROME_CDP_READY",
+                "account_id": acc.account_id,
+                "email": acc.email,
+                "cdp_port": acc.cdp_port,
+                "cdp_endpoint": endpoint,
+                "profile_dir": acc.chrome_profile_dir,
+                "message": (
+                    f"Đã mở cửa sổ Chrome riêng cho `{acc.account_id}` (port {acc.cdp_port}). "
+                    "Hãy đăng nhập tài khoản Google tương ứng trên cửa sổ này 1 lần duy nhất."
+                ),
+            }
+        )
+        return 0
 
     return 1
 

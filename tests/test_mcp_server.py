@@ -32,6 +32,9 @@ async def test_mcp_server_registers_all_manager_tools_and_prompts(tmp_path: Path
         "read_file_excerpt",
         "run_verification_check",
         "get_quota_savings_report",
+        "get_account_pool_status",
+        "register_google_account",
+        "swap_active_account",
     }
     assert expected_tools.issubset(tool_names)
 

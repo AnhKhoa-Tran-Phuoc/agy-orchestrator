@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 import uuid
 
+from agy_orchestrator.account_pool import AccountPoolManager, classify_quota_window_error
 from agy_orchestrator.config import OrchestratorSettings
 from agy_orchestrator.models import ModelRegistry, TaskTier
 
@@ -55,6 +56,8 @@ class WorkerRunResult:
     worker_summary: str
     full_output_path: str | None = None
     warnings: list[str] = field(default_factory=list)
+    active_account_id: str | None = None
+    account_swapped: bool = False
 
     def to_compact_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -64,6 +67,10 @@ class WorkerRunResult:
             payload.pop("full_output_path", None)
         if not self.git_changes_summary:
             payload.pop("git_changes_summary", None)
+        if not self.account_swapped:
+            payload.pop("account_swapped", None)
+        if not self.active_account_id:
+            payload.pop("active_account_id", None)
         return payload
 
 
@@ -216,9 +223,11 @@ class AntigravityWorkerRunner:
         self,
         settings: OrchestratorSettings | None = None,
         registry: ModelRegistry | None = None,
+        pool: AccountPoolManager | None = None,
     ) -> None:
         self.settings = settings or OrchestratorSettings()
         self.registry = registry or ModelRegistry(self.settings.agy_bin)
+        self.pool = pool or AccountPoolManager()
 
     def _state_dir(self, workspace: Path) -> Path:
         state_dir = workspace / self.settings.state_dir_name
@@ -231,6 +240,8 @@ class AntigravityWorkerRunner:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "run_id": result.run_id,
+            "account_id": result.active_account_id,
+            "account_swapped": result.account_swapped,
             "conversation_id": result.conversation_id,
             "status": result.status,
             "model_used": result.model_used,
@@ -247,9 +258,10 @@ class AntigravityWorkerRunner:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def get_quota_stats(self, workspace_dir: str | Path | None = None) -> dict[str, Any]:
-        """Compute cumulative token offloading statistics from `.agy-orch/ledger.jsonl`."""
+        """Compute cumulative token offloading statistics from `.agy-orch/ledger.jsonl` and account pool."""
         workspace = self.settings.resolve_workspace(workspace_dir)
         ledger_file = workspace / self.settings.state_dir_name / "ledger.jsonl"
+        pool_status = self.pool.get_pool_status()
         if not ledger_file.is_file():
             return {
                 "workspace_dir": str(workspace),
@@ -258,6 +270,7 @@ class AntigravityWorkerRunner:
                 "estimated_manager_tokens": 0,
                 "offload_percentage": 0.0,
                 "by_model": {},
+                "account_pool": pool_status,
             }
 
         total_runs = 0
@@ -296,6 +309,7 @@ class AntigravityWorkerRunner:
             "estimated_manager_tokens": mgr_tokens,
             "offload_percentage": offload_pct,
             "by_model": by_model,
+            "account_pool": pool_status,
         }
 
     def build_cli_args(self, spec: WorkerTaskSpec, resolved_model: str, wrapped_prompt: str) -> list[str]:
@@ -334,9 +348,15 @@ class AntigravityWorkerRunner:
         return args
 
     async def run_task(self, spec: WorkerTaskSpec) -> WorkerRunResult:
-        """Execute a single task on an Antigravity worker model and return a compact digest."""
+        """Execute a single task on an Antigravity worker model and auto-swap account on 5h/weekly quota."""
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
         workspace = self.settings.resolve_workspace(spec.workspace_dir)
+
+        # 1. Pre-check 5-hour & weekly quota on active account; auto-swap if >= 85% or in cooldown
+        pre_check = self.pool.ensure_healthy_account()
+        account_swapped = bool(pre_check.get("swapped"))
+        active_acc_id = self.pool.active_account_id
+
         resolved_model = await self.registry.resolve_model(
             tier=spec.tier,
             explicit_model=spec.model,
@@ -416,6 +436,42 @@ class AntigravityWorkerRunner:
         git_summary = await _capture_git_summary(workspace)
         status_str = str(parsed.get("status") or ("SUCCESS" if proc.returncode == 0 else "ERROR"))
 
+        # 2. Record 5h & weekly rolling token usage on the active account
+        total_tok = int(usage_dict.get("total_tokens", 0))
+        if total_tok > 0:
+            self.pool.record_usage(
+                tokens=total_tok,
+                model=resolved_model,
+                account_id=active_acc_id,
+            )
+
+        # 3. Check if this run hit a 5-hour or weekly quota error or crossed the 85% threshold
+        quota_err_window = classify_quota_window_error(raw_response, warnings)
+        if status_str.upper() != "SUCCESS" and quota_err_window is not None:
+            self.pool.mark_account_exhausted(
+                window_type=quota_err_window,
+                account_id=active_acc_id,
+            )
+            swap_res = self.pool.swap_to_next_account(
+                reason=f"agy_{quota_err_window}_quota_exhausted"
+            )
+            if swap_res.get("swapped"):
+                account_swapped = True
+                active_acc_id = str(swap_res.get("to_account", active_acc_id))
+                warnings.append(
+                    f"[AUTO-SWAP] Account `{swap_res.get('from_account')}` hit {quota_err_window} quota; "
+                    f"rotated to `{active_acc_id}`."
+                )
+        else:
+            post_check = self.pool.ensure_healthy_account()
+            if post_check.get("swapped"):
+                account_swapped = True
+                active_acc_id = str(post_check.get("to_account", active_acc_id))
+                warnings.append(
+                    f"[AUTO-SWAP] Account `{post_check.get('from_account')}` reached {post_check.get('reason')}; "
+                    f"rotated to `{active_acc_id}` for subsequent runs."
+                )
+
         approx_mgr_chars = len(worker_summary) + len(git_summary) + 160
         est_mgr_tokens = max(1, approx_mgr_chars // 4)
 
@@ -434,6 +490,8 @@ class AntigravityWorkerRunner:
             worker_summary=worker_summary,
             full_output_path=saved_path_str,
             warnings=warnings,
+            active_account_id=active_acc_id,
+            account_swapped=account_swapped,
         )
 
         self._append_ledger(workspace, result)

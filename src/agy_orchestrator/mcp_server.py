@@ -424,6 +424,52 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
     def get_quota_savings_report(workspace_dir: str | None = None) -> dict[str, Any]:
         return runner.get_quota_stats(workspace_dir=workspace_dir)
 
+    @mcp.tool(
+        description=(
+            "Check the 5-hour ('pct_5h') and weekly ('pct_weekly') quota status across all registered "
+            "Google accounts in the rotation pool, including active account and cooldown timers."
+        )
+    )
+    def get_account_pool_status() -> dict[str, Any]:
+        return runner.pool.get_pool_status()
+
+    @mcp.tool(
+        description=(
+            "Register a Google account ('acc-1', 'acc-2', 'acc-3', ...) into the automatic 5h/weekly "
+            "quota rotation pool with its own isolated Chrome profile and CDP port."
+        )
+    )
+    def register_google_account(
+        account_id: str,
+        email: str = "",
+        cdp_port: int | None = None,
+        limit_5h_tokens: int = 400_000,
+        limit_weekly_tokens: int = 2_500_000,
+    ) -> dict[str, Any]:
+        acc = runner.pool.add_or_update_account(
+            account_id=account_id,
+            email=email,
+            cdp_port=cdp_port,
+            limit_5h_tokens=limit_5h_tokens,
+            limit_weekly_tokens=limit_weekly_tokens,
+        )
+        return acc.compute_window_metrics()
+
+    @mcp.tool(
+        description=(
+            "Manually or proactively swap the active Google account in the pool to the next healthy "
+            "account (or a specified `target_account_id`) when 5h or weekly quota is low."
+        )
+    )
+    def swap_active_account(
+        target_account_id: str | None = None,
+        reason: str = "manager_requested_swap",
+    ) -> dict[str, Any]:
+        return runner.pool.swap_to_next_account(
+            target_account_id=target_account_id,
+            reason=reason,
+        )
+
     @mcp.prompt(
         name="manager_mode",
         title="Manager Mode (Delegate to Antigravity Workers)",
