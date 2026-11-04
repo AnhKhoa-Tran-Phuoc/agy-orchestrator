@@ -22,3 +22,4 @@ Before reporting completion to the user (or creating a Git commit):
 ## Red Flags (Automatic Stop Triggers)
 - Using hedging phrases like *"should work now"*, *"probably passes"*, or *"looks good"* without running the check.
 - Relying on a test run from BEFORE the latest worker edit.
+

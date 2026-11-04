@@ -27,3 +27,4 @@ Before launching parallel workers, verify that **no two concurrent workers edit 
 After all parallel workers return:
 1. Run `inspect_workspace_changes` to confirm only expected files were touched.
 2. Run `run_verification_check` (or dispatch `@worker-nemotron`) to verify all modules integrate cleanly.
+

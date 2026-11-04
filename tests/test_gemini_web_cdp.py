@@ -17,3 +17,4 @@ def test_default_chrome_profile_dir_and_browser_discovery(tmp_path: Path) -> Non
     assert resolved == fake_chrome.resolve()
     assert default_chrome_profile_dir().name == "chrome_profile"
     assert isinstance(is_cdp_port_open(59999), bool)
+

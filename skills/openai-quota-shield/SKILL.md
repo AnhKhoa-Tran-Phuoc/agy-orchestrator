@@ -37,3 +37,4 @@ Never spend OpenAI tokens reviewing buggy first-draft worker code:
 2. **`@worker-nemotron`** runs the test suite (`pytest`, `ruff`, `npm test`) at 0 OpenAI cost.
 3. **`@worker-nemotron-super`** (`opencode/nemotron-3.5-super-vl-free` — 0 cost) or **`boss-argon`** (`argon_boss_review`, backed by 3 rotating Google Web accounts) performs Stage-0/Stage-1 code review (`[P0]`–`[P3]`).
 4. Only after tests pass and Stage-0/Stage-1 review is clean does `boss-gpt` perform the final lightweight sign-off.
+

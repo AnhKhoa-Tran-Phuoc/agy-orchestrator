@@ -24,3 +24,4 @@ Send a targeted fix brief to the worker requiring:
 
 ## Phase 4: Verification Gate
 Run `run_verification_check` to confirm both the new regression test and the existing test suite pass with `exit_code == 0`.
+

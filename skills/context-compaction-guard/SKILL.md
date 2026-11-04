@@ -29,7 +29,7 @@ When any of the following conditions is met:
 
 **Action**:
 1. Have `@worker-glm` save the latest checkpoint in `.agy-orch/STATE.md`.
-2. Advise the user: *"Đã lưu trạng thái vào `.agy-orch/STATE.md`. Bạn có thể gõ `/compact` ngay bây giờ để giải phóng bộ nhớ hội thoại và tiết kiệm tối đa quota OpenAI cho bước tiếp theo."*
+2. Advise the user: *"Session state has been saved to `.agy-orch/STATE.md`. Run `/compact` now to free up conversation memory and preserve OpenAI quota for the next milestone."*
 
 ---
 
@@ -38,3 +38,4 @@ When any of the following conditions is met:
 When a task requires a lengthy architectural comparison or deep multi-file diff audit:
 - Call MCP `argon_boss_review(review_type="plan" | "code_review")` or `ask_gemini_web_auto`.
 - `boss-argon` runs on Antigravity CLI (`acc-1`) and automatically rotates across **3 Google Web accounts (`acc-1`, `acc-2`, `acc-3`)**, returning only a compact digest to your OpenAI session.
+

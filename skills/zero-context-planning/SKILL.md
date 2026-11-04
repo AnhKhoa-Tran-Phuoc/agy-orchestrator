@@ -26,3 +26,4 @@ Whenever calling a subagent or `delegate_flash_worker` / `delegate_task`, struct
    - Do not add unrequested dependencies.
 5. **Expected Summary Format**:
    Instruct the worker: *"Write changes directly to disk. Reply only with a concise bullet summary (max 6 bullets) of files changed and key decisions—do not paste full file contents."*
+

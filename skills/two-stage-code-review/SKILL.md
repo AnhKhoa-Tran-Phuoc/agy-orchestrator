@@ -31,3 +31,4 @@ Followed by 1–2 sentences explaining the failure scenario and the exact fix re
   - For an Antigravity worker: call `continue_worker_session(conversation_id=..., feedback_prompt=...)` with the exact `[P0]`–`[P2]` findings.
   - For an OpenCode subagent: dispatch `@worker-deepseek` or `@worker-gemini-flash` with the exact file, line numbers, and fix instructions.
 - Re-verify until `No findings` (`VERDICT: APPROVED`).
+

@@ -56,3 +56,4 @@ def test_account_pool_5h_and_weekly_auto_swap(tmp_path: Path) -> None:
     assert acc1_after["pct_5h"] == 0.0
     # Weekly tokens on acc-1 are still tracked within the 7-day window
     assert acc1_after["tokens_weekly"] == 88_000
+
