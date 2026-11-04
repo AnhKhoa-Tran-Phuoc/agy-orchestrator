@@ -21,15 +21,16 @@ def test_is_quota_exhausted_detects_weekly_limit_and_429() -> None:
     assert is_quota_exhausted("SUCCESS", "VERDICT: APPROVED\nAll checks passed.", []) is False
 
 
-def test_get_boss_fallback_chain_starts_with_primary_and_deduplicates() -> None:
-    chain = get_boss_fallback_chain("gemini-4-argon-high")
-    assert chain[0] == "gemini-4-argon-high"
-    assert "gemini-4-argon-medium" in chain
-    assert "claude-opus-5-5-high" in chain
+def test_get_boss_fallback_chain_argon_only_vs_secondary() -> None:
+    argon_only = get_boss_fallback_chain("gemini-4-argon-high", include_secondary_models=False)
+    assert argon_only == ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"]
+
+    with_secondary = get_boss_fallback_chain("gemini-4-argon-high", include_secondary_models=True)
+    assert "claude-opus-5-5-high" in with_secondary
 
 
 @pytest.mark.asyncio
-async def test_run_boss_with_fallback_switches_when_argon_high_hits_quota(tmp_path: Path) -> None:
+async def test_run_boss_with_fallback_switches_to_argon_medium_then_web_handoff(tmp_path: Path) -> None:
     fake_agy = tmp_path / "agy.exe"
     fake_agy.write_text("echo", encoding="utf-8")
     settings = OrchestratorSettings(agy_bin=fake_agy, default_workspace=tmp_path)
@@ -71,11 +72,24 @@ async def test_run_boss_with_fallback_switches_when_argon_high_hits_quota(tmp_pa
         boss_prompt="Review diff",
         workspace=tmp_path,
         primary_model="gemini-4-argon-high",
+        open_browser_on_exhaustion=False,
     )
     assert res["status"] == "SUCCESS"
     assert res["model_used"] == "gemini-4-argon-medium"
     assert res["fallback_activated"] is True
-    assert res["attempted_models"] == ["gemini-4-argon-high", "gemini-4-argon-medium"]
+
+    # Now test when all 3 Argon levels are exhausted -> returns WEB_HANDOFF_READY
+    runner.run_task = AsyncMock(side_effect=[quota_fail, quota_fail, quota_fail])  # type: ignore[method-assign]
+    web_res = await run_boss_with_fallback(
+        runner=runner,
+        boss_prompt="Review diff on web",
+        workspace=tmp_path,
+        primary_model="gemini-4-argon-high",
+        on_argon_exhausted="web_handoff",
+        open_browser_on_exhaustion=False,
+    )
+    assert web_res["status"] == "WEB_HANDOFF_READY"
+    assert len(web_res["attempted_models"]) == 3
 
 
 @pytest.mark.asyncio

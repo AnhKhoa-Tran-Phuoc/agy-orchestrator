@@ -118,6 +118,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         workspace_dir: str | None = None,
         file_paths: list[str] | None = None,
         argon_level: Literal["high", "medium", "low"] = "high",
+        on_argon_exhausted: Literal["web_handoff", "secondary_models"] = "web_handoff",
         conversation_id: str | None = None,
         timeout_sec: int = 300,
     ) -> dict[str, Any]:
@@ -163,6 +164,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
             boss_prompt=boss_prompt,
             workspace=target_ws,
             primary_model=explicit_model,
+            on_argon_exhausted=on_argon_exhausted,
             conversation_id=conversation_id,
             timeout_sec=timeout_sec,
             open_browser_on_exhaustion=True,

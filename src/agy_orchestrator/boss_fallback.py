@@ -1,14 +1,12 @@
-"""Quota-aware fallback chain and Web/AI-Studio handoff for the Gemini 4 Argon Boss."""
+"""Quota-aware fallback chain and Gemini Web UI handoff for Google One AI Pro accounts."""
 
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-import json
 import os
 from pathlib import Path
-from typing import Any
-import urllib.request
+from typing import Any, Literal
 import webbrowser
 
 from agy_orchestrator.runner import AntigravityWorkerRunner, WorkerRunResult, WorkerTaskSpec
@@ -28,9 +26,13 @@ QUOTA_ERROR_KEYWORDS: tuple[str, ...] = (
     "not available for this account",
 )
 
-DEFAULT_BOSS_FALLBACK_CHAIN: tuple[str, ...] = (
+ARGON_FAMILY_CHAIN: tuple[str, ...] = (
     "gemini-4-argon-high",
     "gemini-4-argon-medium",
+    "gemini-4-argon-low",
+)
+
+SECONDARY_BOSS_CHAIN: tuple[str, ...] = (
     "claude-opus-5-5-high",
     "claude-sonnet-5-5-high",
     "gemini-3.8-flash-high",
@@ -49,74 +51,24 @@ def is_quota_exhausted(status: str, response_text: str, warnings: list[str] | No
     return False
 
 
-def get_boss_fallback_chain(primary_model: str = "gemini-4-argon-high") -> list[str]:
-    """Return the ordered list of Boss models to try in `agy` before falling back to Web."""
+def get_boss_fallback_chain(
+    primary_model: str = "gemini-4-argon-high",
+    include_secondary_models: bool = True,
+) -> list[str]:
+    """Return the ordered list of Boss models to try in `agy`."""
     env_chain = os.environ.get("AGY_BOSS_FALLBACK_MODELS", "").strip()
     if env_chain:
-        custom = [m.strip() for m in env_chain.split(",") if m.strip()]
+        base = [m.strip() for m in env_chain.split(",") if m.strip()]
     else:
-        custom = list(DEFAULT_BOSS_FALLBACK_CHAIN)
+        base = list(ARGON_FAMILY_CHAIN)
+        if include_secondary_models:
+            base.extend(SECONDARY_BOSS_CHAIN)
 
     ordered: list[str] = [primary_model]
-    for item in custom:
+    for item in base:
         if item not in ordered:
             ordered.append(item)
     return ordered
-
-
-async def call_google_ai_studio_web_api(
-    prompt: str,
-    api_key: str | None = None,
-    model: str | None = None,
-    timeout_sec: int = 120,
-) -> dict[str, Any] | None:
-    """Call Google AI Studio / Gemini Web REST API (`GEMINI_API_KEY` / `GOOGLE_API_KEY`) if configured."""
-    resolved_key = (
-        api_key
-        or os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or ""
-    ).strip()
-    if not resolved_key:
-        return None
-
-    target_model = (model or os.environ.get("GEMINI_WEB_API_MODEL") or "gemini-2.5-pro").strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
-
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2},
-    }
-    body_bytes = json.dumps(payload).encode("utf-8")
-
-    def _sync_post() -> dict[str, Any]:
-        req = urllib.request.Request(
-            url,
-            data=body_bytes,
-            headers={"x-goog-api-key": resolved_key, "Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
-
-    data = await asyncio.to_thread(_sync_post)
-
-    candidates = data.get("candidates") or []
-    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-    text = "\n".join(str(p.get("text", "")) for p in parts if p.get("text")).strip()
-    usage_meta = data.get("usageMetadata") or {}
-
-    return {
-        "status": "SUCCESS",
-        "source": "google_ai_studio_web_api",
-        "model_used": f"web-api/{target_model}",
-        "worker_summary": text,
-        "antigravity_usage": {
-            "input_tokens": int(usage_meta.get("promptTokenCount", 0)),
-            "output_tokens": int(usage_meta.get("candidatesTokenCount", 0)),
-            "total_tokens": int(usage_meta.get("totalTokenCount", 0)),
-        },
-    }
 
 
 async def prepare_web_handoff_bundle(
@@ -126,7 +78,7 @@ async def prepare_web_handoff_bundle(
     open_browser: bool = False,
     web_url: str = "https://gemini.google.com/app",
 ) -> dict[str, Any]:
-    """Save the Boss review prompt + diff to a Markdown file, copy to Clipboard, and optionally open Gemini Web."""
+    """Save the Boss review prompt + diff to a Markdown file, copy to Clipboard, and open Gemini Web."""
     handoff_dir = workspace / ".agy-orch" / "web_handoff"
     handoff_dir.mkdir(parents=True, exist_ok=True)
 
@@ -169,9 +121,9 @@ async def prepare_web_handoff_bundle(
         "browser_opened": browser_opened,
         "web_url": web_url,
         "instructions": (
-            "Prompt đã được lưu vào file và copy sẵn vào Clipboard. "
-            f"Hãy mở {web_url}, nhấn Ctrl+V để dán cho Boss duyệt trên Web, "
-            "sau đó dán kết quả VERDICT vào lại cuộc hội thoại."
+            "Đã hết quota Argon tuần trên Antigravity. Toàn bộ nội dung cần duyệt + git diff đã được "
+            f"copy sẵn vào Clipboard và mở trang {web_url} (tài khoản Google Pro của bạn). "
+            "Bạn chỉ cần nhấn Ctrl+V trên Gemini Web rồi dán kết quả VERDICT vào lại cuộc hội thoại."
         ),
     }
 
@@ -181,21 +133,28 @@ async def run_boss_with_fallback(
     boss_prompt: str,
     workspace: Path,
     primary_model: str = "gemini-4-argon-high",
+    on_argon_exhausted: Literal["web_handoff", "secondary_models"] = "web_handoff",
     conversation_id: str | None = None,
     timeout_sec: int = 300,
-    open_browser_on_exhaustion: bool = False,
+    open_browser_on_exhaustion: bool = True,
 ) -> dict[str, Any]:
-    """Execute a Boss review/planning prompt with automatic multi-tier fallback:
+    """Execute a Boss review/planning prompt tailored for a Google One AI Pro account:
 
-    1. Try `primary_model` (`gemini-4-argon-high`) in `agy`.
-    2. If weekly quota/rate-limit is hit, try Google AI Studio Web API (`GEMINI_API_KEY`) if set.
-    3. Otherwise iterate through fallback Boss models in `agy` (`gemini-4-argon-medium`,
-       `claude-opus-5-5-high`, `claude-sonnet-5-5-high`, `gemini-3.8-flash-high`).
-    4. If all CLI & API tiers are exhausted, generate a ready-to-paste Web Handoff bundle
-       (copied to Clipboard + saved to `.agy-orch/web_handoff/latest_boss_prompt.md`).
+    1. Try `gemini-4-argon-high` -> `gemini-4-argon-medium` -> `gemini-4-argon-low` in `agy`.
+    2. When Argon weekly quota is exhausted:
+       - If `on_argon_exhausted="web_handoff"` (default): Immediately copy the prompt + diff
+         to the Windows Clipboard and open `https://gemini.google.com/app` so the user can
+         use their Google Pro Web quota with a single `Ctrl+V`.
+       - If `on_argon_exhausted="secondary_models"`: Automatically continue with
+         `claude-opus-5-5-high` -> `claude-sonnet-5-5-high` -> `gemini-3.8-flash-high` in `agy`
+         before falling back to Web Handoff.
     """
     attempted_models: list[str] = []
-    chain = get_boss_fallback_chain(primary_model=primary_model)
+    include_secondary = on_argon_exhausted == "secondary_models"
+    chain = get_boss_fallback_chain(
+        primary_model=primary_model,
+        include_secondary_models=include_secondary,
+    )
 
     for idx, candidate_model in enumerate(chain):
         attempted_models.append(candidate_model)
@@ -218,21 +177,6 @@ async def run_boss_with_fallback(
                 payload["attempted_models"] = attempted_models
             return payload
 
-        # After primary Argon model fails due to quota, try Google AI Studio Web API if configured
-        if idx == 0:
-            try:
-                web_api_res = await call_google_ai_studio_web_api(
-                    prompt=boss_prompt,
-                    timeout_sec=min(timeout_sec, 120),
-                )
-                if web_api_res is not None:
-                    web_api_res["fallback_activated"] = True
-                    web_api_res["attempted_models"] = attempted_models
-                    return web_api_res
-            except Exception:
-                pass
-
-    # All automated tiers exhausted -> prepare Web Browser Handoff
     handoff = await prepare_web_handoff_bundle(
         prompt=boss_prompt,
         workspace=workspace,
