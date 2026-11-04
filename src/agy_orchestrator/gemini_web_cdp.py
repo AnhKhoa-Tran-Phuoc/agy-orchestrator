@@ -329,6 +329,11 @@ async def query_gemini_web_cdp(
 
     for attempt in range(max_attempts):
         active_acc = pool_mgr.get_active_web_account()
+        if cdp_port is not None and attempt == 0:
+            for cand in pool_mgr.accounts.values():
+                if cand.cdp_port == cdp_port:
+                    active_acc = cand
+                    break
         attempted_accounts.append(active_acc.account_id)
         port_to_use = cdp_port if (cdp_port is not None and attempt == 0) else active_acc.cdp_port
         prof_dir = Path(active_acc.chrome_profile_dir) if active_acc.chrome_profile_dir else None

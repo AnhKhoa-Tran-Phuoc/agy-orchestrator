@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from agy_orchestrator.account_pool import AccountPoolManager
 from agy_orchestrator.boss_fallback import (
     get_boss_fallback_chain,
     is_quota_exhausted,
@@ -34,7 +35,10 @@ async def test_run_boss_with_fallback_switches_to_argon_medium_then_web_handoff(
     fake_agy = tmp_path / "agy.exe"
     fake_agy.write_text("echo", encoding="utf-8")
     settings = OrchestratorSettings(agy_bin=fake_agy, default_workspace=tmp_path)
-    runner = AntigravityWorkerRunner(settings=settings)
+    runner = AntigravityWorkerRunner(
+        settings=settings,
+        pool=AccountPoolManager(pool_file=tmp_path / "pool.json"),
+    )
 
     quota_fail = WorkerRunResult(
         run_id="r1",
@@ -111,7 +115,10 @@ async def test_run_boss_with_fallback_web_auto_extracts_response_hands_free(tmp_
     fake_agy = tmp_path / "agy.exe"
     fake_agy.write_text("echo", encoding="utf-8")
     settings = OrchestratorSettings(agy_bin=fake_agy, default_workspace=tmp_path)
-    runner = AntigravityWorkerRunner(settings=settings)
+    runner = AntigravityWorkerRunner(
+        settings=settings,
+        pool=AccountPoolManager(pool_file=tmp_path / "pool.json"),
+    )
 
     quota_fail = WorkerRunResult(
         run_id="r1",
