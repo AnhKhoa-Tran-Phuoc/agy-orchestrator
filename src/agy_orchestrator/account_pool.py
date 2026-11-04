@@ -1,4 +1,4 @@
-"""Multi-account quota tracker (5-hour & weekly windows) and automatic account swapper."""
+"""Multi-account quota tracker (5-hour & weekly windows) separating Argon (CLI vs Web) and 3.8 Flash (CLI)."""
 
 from __future__ import annotations
 
@@ -65,23 +65,30 @@ def classify_quota_window_error(response_text: str, warnings: list[str] | None =
 
 @dataclass(slots=True)
 class AccountEntry:
-    """Represents a single Google account configured for Antigravity / Gemini Web rotation."""
+    """Represents a Google account in the orchestrator pool.
+
+    - `acc-1` (Google Pro): `has_agy_argon=True`, `has_agy_flash=True` (Argon on CLI + Web, 3.8 Flash on CLI)
+    - `acc-2`, `acc-3`, ...: `has_agy_argon=False`, `has_agy_flash=True` (Argon on Web ONLY, 3.8 Flash on CLI)
+    """
 
     account_id: str
     email: str = ""
     cdp_port: int = 9222
     chrome_profile_dir: str = ""
     has_agy_argon: bool = False
+    has_agy_flash: bool = True
     limit_5h_tokens: int = DEFAULT_5H_TOKEN_LIMIT
     limit_weekly_tokens: int = DEFAULT_WEEKLY_TOKEN_LIMIT
     limit_5h_runs: int = DEFAULT_5H_RUN_LIMIT
     limit_weekly_runs: int = DEFAULT_WEEKLY_RUN_LIMIT
     cooldown_until_ts: float = 0.0
     cooldown_reason: str | None = None
+    argon_cli_cooldown_until_ts: float = 0.0
+    web_cooldown_until_ts: float = 0.0
     usage_history: list[dict[str, Any]] = field(default_factory=list)
 
     def prune_history(self, now_ts: float | None = None) -> None:
-        """Keep only usage records within the last 7 days."""
+        """Keep only usage records within the last 7 days and expire elapsed cooldowns."""
         now = now_ts if now_ts is not None else time.time()
         cutoff = now - WINDOW_WEEKLY_SECONDS
         self.usage_history = [
@@ -90,6 +97,10 @@ class AccountEntry:
         if self.cooldown_until_ts > 0 and now >= self.cooldown_until_ts:
             self.cooldown_until_ts = 0.0
             self.cooldown_reason = None
+        if self.argon_cli_cooldown_until_ts > 0 and now >= self.argon_cli_cooldown_until_ts:
+            self.argon_cli_cooldown_until_ts = 0.0
+        if self.web_cooldown_until_ts > 0 and now >= self.web_cooldown_until_ts:
+            self.web_cooldown_until_ts = 0.0
 
     def compute_window_metrics(self, now_ts: float | None = None) -> dict[str, Any]:
         """Compute rolling 5-hour and 7-day token and run percentages."""
@@ -123,6 +134,8 @@ class AccountEntry:
         cooldown_remaining_min = (
             round((self.cooldown_until_ts - now) / 60.0, 1) if in_cooldown else 0.0
         )
+        argon_cli_ready = self.has_agy_argon and (self.argon_cli_cooldown_until_ts <= now) and not in_cooldown
+        web_ready = self.web_cooldown_until_ts <= now
 
         return {
             "account_id": self.account_id,
@@ -130,7 +143,11 @@ class AccountEntry:
             "cdp_port": self.cdp_port,
             "chrome_profile_dir": self.chrome_profile_dir,
             "has_agy_argon": self.has_agy_argon,
-            "mode": "cli_and_web" if self.has_agy_argon else "web_only",
+            "has_agy_flash": self.has_agy_flash,
+            "argon_routing": "agy_cli_then_web" if self.has_agy_argon else "web_only",
+            "flash_routing": "agy_cli",
+            "argon_cli_ready": argon_cli_ready,
+            "web_ready": web_ready,
             "tokens_5h": tokens_5h,
             "runs_5h": runs_5h,
             "pct_5h": pct_5h,
@@ -147,7 +164,7 @@ class AccountEntry:
         swap_threshold_pct: float = DEFAULT_SWAP_THRESHOLD_PCT,
         now_ts: float | None = None,
     ) -> tuple[bool, str | None]:
-        """Return `(True, reason)` if this account is in cooldown or above the 5h/weekly threshold."""
+        """Return `(True, reason)` if this account's CLI Flash quota is in cooldown or >= threshold."""
         metrics = self.compute_window_metrics(now_ts)
         if metrics["in_cooldown"]:
             return True, str(metrics["cooldown_reason"] or "cooldown")
@@ -159,7 +176,7 @@ class AccountEntry:
 
 
 class AccountPoolManager:
-    """Manages a pool of Google Antigravity / Gemini Web accounts and auto-swaps on 5h/weekly quota."""
+    """Manages Google accounts with independent routing for Argon (CLI on acc-1, Web on acc-2..N) and Flash 3.8 (CLI on all)."""
 
     def __init__(
         self,
@@ -169,13 +186,13 @@ class AccountPoolManager:
         self.pool_file = (pool_file or default_pool_file()).resolve()
         self.swap_threshold_pct = swap_threshold_pct
         self.active_account_id: str = "acc-1"
+        self.active_web_account_id: str = "acc-1"
         self.accounts: dict[str, AccountEntry] = {}
         self.swap_events: list[dict[str, Any]] = []
         self._load()
 
     def _default_profile_dir_for(self, account_id: str) -> str:
         if account_id == "acc-1":
-            # Reuse the primary chrome_profile directory for acc-1 for backwards compatibility
             return str((self.pool_file.parent / "chrome_profile").resolve())
         return str((self.pool_file.parent / "chrome_profiles" / account_id).resolve())
 
@@ -187,9 +204,11 @@ class AccountPoolManager:
                 cdp_port=9222,
                 chrome_profile_dir=self._default_profile_dir_for("acc-1"),
                 has_agy_argon=True,
+                has_agy_flash=True,
             )
             self.accounts = {"acc-1": default_acc}
             self.active_account_id = "acc-1"
+            self.active_web_account_id = "acc-1"
             self._save()
             return
 
@@ -211,6 +230,7 @@ class AccountPoolManager:
                     item.get("chrome_profile_dir") or self._default_profile_dir_for(acc_id)
                 ),
                 has_agy_argon=bool(item.get("has_agy_argon", acc_id == "acc-1")),
+                has_agy_flash=bool(item.get("has_agy_flash", True)),
                 limit_5h_tokens=int(item.get("limit_5h_tokens", DEFAULT_5H_TOKEN_LIMIT)),
                 limit_weekly_tokens=int(
                     item.get("limit_weekly_tokens", DEFAULT_WEEKLY_TOKEN_LIMIT)
@@ -219,6 +239,8 @@ class AccountPoolManager:
                 limit_weekly_runs=int(item.get("limit_weekly_runs", DEFAULT_WEEKLY_RUN_LIMIT)),
                 cooldown_until_ts=float(item.get("cooldown_until_ts", 0.0)),
                 cooldown_reason=item.get("cooldown_reason"),
+                argon_cli_cooldown_until_ts=float(item.get("argon_cli_cooldown_until_ts", 0.0)),
+                web_cooldown_until_ts=float(item.get("web_cooldown_until_ts", 0.0)),
                 usage_history=list(item.get("usage_history", [])),
             )
 
@@ -228,17 +250,24 @@ class AccountPoolManager:
                 email="primary-google-pro",
                 cdp_port=9222,
                 chrome_profile_dir=self._default_profile_dir_for("acc-1"),
+                has_agy_argon=True,
+                has_agy_flash=True,
             )
 
         self.accounts = loaded
         active = str(raw.get("active_account_id", ""))
         self.active_account_id = active if active in self.accounts else next(iter(self.accounts))
+        active_web = str(raw.get("active_web_account_id", ""))
+        self.active_web_account_id = (
+            active_web if active_web in self.accounts else self.active_account_id
+        )
         self.swap_events = list(raw.get("swap_events", []))[-30:]
 
     def _save(self) -> None:
         self.pool_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "active_account_id": self.active_account_id,
+            "active_web_account_id": self.active_web_account_id,
             "swap_threshold_pct": self.swap_threshold_pct,
             "accounts": [asdict(acc) for acc in self.accounts.values()],
             "swap_events": self.swap_events[-30:],
@@ -254,10 +283,11 @@ class AccountPoolManager:
         email: str = "",
         cdp_port: int | None = None,
         has_agy_argon: bool | None = None,
+        has_agy_flash: bool = True,
         limit_5h_tokens: int = DEFAULT_5H_TOKEN_LIMIT,
         limit_weekly_tokens: int = DEFAULT_WEEKLY_TOKEN_LIMIT,
     ) -> AccountEntry:
-        """Register a new Google account in the rotation pool."""
+        """Register or update a Google account in the pool."""
         acc_id = account_id.strip()
         if acc_id in self.accounts:
             acc = self.accounts[acc_id]
@@ -267,6 +297,7 @@ class AccountPoolManager:
                 acc.cdp_port = cdp_port
             if has_agy_argon is not None:
                 acc.has_agy_argon = has_agy_argon
+            acc.has_agy_flash = has_agy_flash
             acc.limit_5h_tokens = limit_5h_tokens
             acc.limit_weekly_tokens = limit_weekly_tokens
         else:
@@ -280,6 +311,7 @@ class AccountPoolManager:
                 cdp_port=next_port,
                 chrome_profile_dir=self._default_profile_dir_for(acc_id),
                 has_agy_argon=bool(has_agy_argon) if has_agy_argon is not None else (acc_id == "acc-1"),
+                has_agy_flash=has_agy_flash,
                 limit_5h_tokens=limit_5h_tokens,
                 limit_weekly_tokens=limit_weekly_tokens,
             )
@@ -289,10 +321,45 @@ class AccountPoolManager:
         return acc
 
     def get_active_account(self) -> AccountEntry:
-        """Return the currently active `AccountEntry`."""
+        """Return the active account for Antigravity CLI (`gemini-3.8-flash` & `acc-1` Argon)."""
         if self.active_account_id not in self.accounts:
             self.active_account_id = next(iter(self.accounts))
         return self.accounts[self.active_account_id]
+
+    def get_active_web_account(self) -> AccountEntry:
+        """Return the active account for Gemini Web CDP (`acc-1`, `acc-2`, `acc-3`, ...)."""
+        if self.active_web_account_id not in self.accounts:
+            self.active_web_account_id = self.active_account_id
+        return self.accounts[self.active_web_account_id]
+
+    def swap_web_account(self, reason: str = "web_quota_rotation", now_ts: float | None = None) -> AccountEntry:
+        """Rotate `active_web_account_id` across `acc-1` -> `acc-2` -> `acc-3` for Gemini Web Boss."""
+        now = now_ts if now_ts is not None else time.time()
+        ids = list(self.accounts.keys())
+        start_idx = ids.index(self.active_web_account_id) if self.active_web_account_id in ids else 0
+        ordered = ids[start_idx + 1 :] + ids[: start_idx + 1]
+        prev = self.active_web_account_id
+
+        for cid in ordered:
+            cand = self.accounts[cid]
+            cand.prune_history(now)
+            if cand.web_cooldown_until_ts <= now:
+                self.active_web_account_id = cid
+                break
+
+        if self.active_web_account_id != prev:
+            self.swap_events.append(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "channel": "gemini_web_argon",
+                    "from_account": prev,
+                    "to_account": self.active_web_account_id,
+                    "swapped": True,
+                    "reason": reason,
+                }
+            )
+        self._save()
+        return self.accounts[self.active_web_account_id]
 
     def record_usage(
         self,
@@ -316,26 +383,44 @@ class AccountPoolManager:
         self._save()
         return metrics
 
+    def mark_argon_cli_exhausted(
+        self,
+        window_type: str = "weekly",
+        account_id: str | None = None,
+        now_ts: float | None = None,
+    ) -> AccountEntry:
+        """Mark ONLY `argon` on Antigravity CLI as exhausted (so `gemini-3.8-flash` on CLI keeps working!)."""
+        now = now_ts if now_ts is not None else time.time()
+        acc = self.accounts.get(account_id or self.active_account_id) or self.get_active_account()
+        duration = WINDOW_WEEKLY_SECONDS if window_type == "weekly" else WINDOW_5H_SECONDS
+        acc.argon_cli_cooldown_until_ts = now + duration
+        self._save()
+        return acc
+
     def mark_account_exhausted(
         self,
         window_type: str = "5h",
         account_id: str | None = None,
         now_ts: float | None = None,
+        channel: str = "cli_flash",
     ) -> AccountEntry:
         """Put an account into a 5-hour or 7-day cooldown after hitting a quota limit."""
         now = now_ts if now_ts is not None else time.time()
         acc = self.accounts.get(account_id or self.active_account_id) or self.get_active_account()
-        if window_type == "weekly":
-            acc.cooldown_until_ts = now + WINDOW_WEEKLY_SECONDS
-            acc.cooldown_reason = "weekly_quota_exhausted"
+        duration = WINDOW_WEEKLY_SECONDS if window_type == "weekly" else WINDOW_5H_SECONDS
+
+        if channel == "web":
+            acc.web_cooldown_until_ts = now + duration
+        elif channel == "cli_argon":
+            acc.argon_cli_cooldown_until_ts = now + duration
         else:
-            acc.cooldown_until_ts = now + WINDOW_5H_SECONDS
-            acc.cooldown_reason = "5h_quota_exhausted"
+            acc.cooldown_until_ts = now + duration
+            acc.cooldown_reason = f"{window_type}_quota_exhausted"
         self._save()
         return acc
 
     def ensure_healthy_account(self, now_ts: float | None = None) -> dict[str, Any]:
-        """Check if active account is near 5h/weekly quota or in cooldown; auto-swap if needed."""
+        """Check if active CLI Flash account is near 5h/weekly quota or in cooldown; auto-swap if needed."""
         now = now_ts if now_ts is not None else time.time()
         active = self.get_active_account()
         needs_swap, reason = active.is_near_or_over_limit(
@@ -356,7 +441,7 @@ class AccountPoolManager:
         reason: str = "manual_swap",
         now_ts: float | None = None,
     ) -> dict[str, Any]:
-        """Rotate `active_account_id` to the healthiest available account in the pool."""
+        """Rotate `active_account_id` (used by `gemini-3.8-flash` on `agy` CLI) to the next healthy account."""
         now = now_ts if now_ts is not None else time.time()
         previous_id = self.active_account_id
 
@@ -372,9 +457,10 @@ class AccountPoolManager:
             chosen = self.accounts[previous_id]
             swapped = False
 
-            # First pass: find an account not near limit and not in cooldown
             for cid in ordered_ids:
                 cand = self.accounts[cid]
+                if not cand.has_agy_flash:
+                    continue
                 over, _ = cand.is_near_or_over_limit(self.swap_threshold_pct, now_ts=now)
                 if not over:
                     chosen = cand
@@ -382,7 +468,6 @@ class AccountPoolManager:
                     swapped = cid != previous_id
                     break
             else:
-                # Second pass: pick the account with the lowest 5h usage percentage
                 best_acc = min(
                     self.accounts.values(),
                     key=lambda a: (
@@ -396,6 +481,7 @@ class AccountPoolManager:
 
         event = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "channel": "agy_cli_flash",
             "from_account": previous_id,
             "to_account": self.active_account_id,
             "swapped": swapped,
@@ -422,10 +508,10 @@ class AccountPoolManager:
         ]
         return {
             "pool_file": str(self.pool_file),
-            "active_account_id": self.active_account_id,
+            "active_cli_flash_account_id": self.active_account_id,
+            "active_web_argon_account_id": self.active_web_account_id,
             "swap_threshold_pct": self.swap_threshold_pct,
             "total_accounts": len(self.accounts),
             "accounts": accounts_metrics,
             "recent_swaps": self.swap_events[-10:],
         }
-

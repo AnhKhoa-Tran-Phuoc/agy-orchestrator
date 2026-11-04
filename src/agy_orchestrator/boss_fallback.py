@@ -185,6 +185,9 @@ async def run_boss_with_fallback(
                     payload["attempted_models"] = attempted_models
                 return payload
 
+        # All Argon CLI levels exhausted on acc-1 -> mark Argon CLI cooldown (3.8 Flash on CLI stays active!)
+        runner.pool.mark_argon_cli_exhausted(window_type="weekly", account_id=active_acc.account_id)
+
     if use_web_directly or on_argon_exhausted == "web_auto":
         try:
             web_res = await query_gemini_web_cdp(

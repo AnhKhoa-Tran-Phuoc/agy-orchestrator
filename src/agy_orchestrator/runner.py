@@ -447,21 +447,30 @@ class AntigravityWorkerRunner:
 
         # 3. Check if this run hit a 5-hour or weekly quota error or crossed the 85% threshold
         quota_err_window = classify_quota_window_error(raw_response, warnings)
+        is_argon_model = "argon" in resolved_model.lower()
         if status_str.upper() != "SUCCESS" and quota_err_window is not None:
-            self.pool.mark_account_exhausted(
-                window_type=quota_err_window,
-                account_id=active_acc_id,
-            )
-            swap_res = self.pool.swap_to_next_account(
-                reason=f"agy_{quota_err_window}_quota_exhausted"
-            )
-            if swap_res.get("swapped"):
-                account_swapped = True
-                active_acc_id = str(swap_res.get("to_account", active_acc_id))
+            if is_argon_model:
+                # Do NOT mark acc-1's 3.8 Flash quota exhausted when only Argon CLI hits its limit!
                 warnings.append(
-                    f"[AUTO-SWAP] Account `{swap_res.get('from_account')}` hit {quota_err_window} quota; "
-                    f"rotated to `{active_acc_id}`."
+                    f"[ARGON-CLI-QUOTA] Account `{active_acc_id}` hit {quota_err_window} Argon CLI limit on `{resolved_model}`; "
+                    "3.8 Flash on Antigravity CLI remains active."
                 )
+            else:
+                self.pool.mark_account_exhausted(
+                    window_type=quota_err_window,
+                    account_id=active_acc_id,
+                    channel="cli_flash",
+                )
+                swap_res = self.pool.swap_to_next_account(
+                    reason=f"agy_flash_{quota_err_window}_quota_exhausted"
+                )
+                if swap_res.get("swapped"):
+                    account_swapped = True
+                    active_acc_id = str(swap_res.get("to_account", active_acc_id))
+                    warnings.append(
+                        f"[AUTO-SWAP] Account `{swap_res.get('from_account')}` hit {quota_err_window} Flash quota; "
+                        f"rotated Antigravity CLI to `{active_acc_id}`."
+                    )
         else:
             post_check = self.pool.ensure_healthy_account()
             if post_check.get("swapped"):

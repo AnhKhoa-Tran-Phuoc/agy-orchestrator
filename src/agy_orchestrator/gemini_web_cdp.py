@@ -301,12 +301,11 @@ async def query_gemini_web_cdp(
 ) -> dict[str, Any]:
     """Automatically input `prompt` into Gemini Web and auto-swap accounts if 5h/weekly quota is hit."""
     pool_mgr = pool or AccountPoolManager()
-    ensure_res = pool_mgr.ensure_healthy_account()
     attempted_accounts: list[str] = []
     max_attempts = max(1, len(pool_mgr.accounts))
 
     for attempt in range(max_attempts):
-        active_acc = pool_mgr.get_active_account()
+        active_acc = pool_mgr.get_active_web_account()
         attempted_accounts.append(active_acc.account_id)
         port_to_use = cdp_port if (cdp_port is not None and attempt == 0) else active_acc.cdp_port
         prof_dir = Path(active_acc.chrome_profile_dir) if active_acc.chrome_profile_dir else None
@@ -331,19 +330,20 @@ async def query_gemini_web_cdp(
 
         quota_window = classify_quota_window_error(str(res.get("worker_summary", "")))
         if res.get("status") == "SUCCESS" and quota_window is None:
-            if ensure_res.get("swapped") or attempt > 0:
+            if attempt > 0:
                 res["account_swapped"] = True
                 res["attempted_accounts"] = attempted_accounts
             return res
 
-        # If quota error on web or login required and we have more accounts in pool, rotate!
+        # If quota error on web or login required and we have more accounts in pool, rotate web account!
         if quota_window is not None:
             pool_mgr.mark_account_exhausted(
                 window_type=quota_window,
                 account_id=active_acc.account_id,
+                channel="web",
             )
         if attempt + 1 < max_attempts:
-            pool_mgr.swap_to_next_account(reason=f"web_{quota_window or res.get('status', 'fail')}")
+            pool_mgr.swap_web_account(reason=f"web_{quota_window or res.get('status', 'fail')}")
         else:
             res["attempted_accounts"] = attempted_accounts
             return res
