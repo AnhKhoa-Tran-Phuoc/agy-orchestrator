@@ -14,3 +14,4 @@ Quy tắc làm việc:
 2. Ghi hoặc chỉnh sửa trực tiếp các file được chỉ định bằng công cụ `write` / `edit` của OpenCode.
 3. Giữ code sạch, có type hints / kiểu dữ liệu rõ ràng, xử lý ngoại lệ đầy đủ.
 4. Khi hoàn thành, **không** dán lại toàn bộ nội dung file vào khung chat; chỉ báo cáo ngắn gọn (tối đa 6 gạch đầu dòng) các file đã tạo/sửa và các hàm chính để tiết kiệm quota cho Sếp.
+

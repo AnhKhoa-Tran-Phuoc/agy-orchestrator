@@ -10,6 +10,8 @@ import sys
 import tomllib
 from typing import Any
 
+from agy_orchestrator.opencode_installer import MANAGED_SKILL_DIRS, bundled_skills_dir
+
 BLOCK_START = "# >>> agy-orchestrator >>>"
 BLOCK_END = "# <<< agy-orchestrator <<<"
 
@@ -91,9 +93,7 @@ def remove_toml_block(existing_toml: str) -> tuple[str, bool]:
 
 def bundled_skill_source() -> Path:
     """Locate the bundled `skills/antigravity-manager/SKILL.md` file."""
-    repo_root = Path(__file__).resolve().parents[2]
-    candidate = repo_root / "skills" / "antigravity-manager" / "SKILL.md"
-    return candidate
+    return bundled_skills_dir() / "antigravity-manager" / "SKILL.md"
 
 
 def install_to_codex(
@@ -103,7 +103,7 @@ def install_to_codex(
     install_skill: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Register `antigravity_workers` MCP server and optional Manager skill in `~/.codex`."""
+    """Register `antigravity_workers` MCP server and all 6 Multi-Agent skills in `~/.codex`."""
     target_home = (codex_home or (Path.home() / ".codex")).expanduser().resolve()
     config_path = target_home / "config.toml"
     existing_text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
@@ -115,8 +115,13 @@ def install_to_codex(
     )
     updated_text = upsert_toml_block(existing_text, block)
 
-    skill_src = bundled_skill_source()
+    src_skills_dir = bundled_skills_dir()
     skill_dst = target_home / "skills" / "antigravity-manager" / "SKILL.md"
+    installed_skills: list[str] = []
+    if install_skill:
+        for sname in MANAGED_SKILL_DIRS:
+            if (src_skills_dir / sname / "SKILL.md").is_file():
+                installed_skills.append(sname)
 
     backup_path: Path | None = None
     if not dry_run:
@@ -127,16 +132,18 @@ def install_to_codex(
             shutil.copy2(config_path, backup_path)
         config_path.write_text(updated_text, encoding="utf-8")
 
-        if install_skill and skill_src.is_file():
-            skill_dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(skill_src, skill_dst)
+        for sname in installed_skills:
+            dst_file = target_home / "skills" / sname / "SKILL.md"
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_skills_dir / sname / "SKILL.md", dst_file)
 
     return {
         "dry_run": dry_run,
         "config_path": str(config_path),
         "backup_path": str(backup_path) if backup_path else None,
-        "skill_installed": bool(install_skill and skill_src.is_file()),
+        "skill_installed": bool(installed_skills),
         "skill_path": str(skill_dst) if install_skill else None,
+        "installed_skills": installed_skills,
         "toml_block": block,
     }
 
@@ -145,7 +152,7 @@ def uninstall_from_codex(
     codex_home: Path | None = None,
     remove_skill: bool = True,
 ) -> dict[str, Any]:
-    """Remove `antigravity_workers` MCP block and skill from `~/.codex`."""
+    """Remove `antigravity_workers` MCP block and managed skills from `~/.codex`."""
     target_home = (codex_home or (Path.home() / ".codex")).expanduser().resolve()
     config_path = target_home / "config.toml"
     removed_block = False
@@ -156,14 +163,17 @@ def uninstall_from_codex(
         if removed_block:
             config_path.write_text(cleaned_text, encoding="utf-8")
 
-    skill_dir = target_home / "skills" / "antigravity-manager"
-    removed_skill = False
-    if remove_skill and skill_dir.is_dir():
-        shutil.rmtree(skill_dir)
-        removed_skill = True
+    removed_skills: list[str] = []
+    if remove_skill:
+        for sname in MANAGED_SKILL_DIRS:
+            sdir = target_home / "skills" / sname
+            if sdir.is_dir():
+                shutil.rmtree(sdir)
+                removed_skills.append(sname)
 
     return {
         "config_path": str(config_path),
         "removed_mcp_block": removed_block,
-        "removed_skill": removed_skill,
+        "removed_skill": bool(removed_skills),
+        "removed_skills": removed_skills,
     }

@@ -16,3 +16,4 @@ Khi nhận nhiệm vụ từ Sếp (`boss-gpt`, `boss-gpt-sol`, hoặc `boss-arg
    - Dùng `flash_level="high"` (`gemini-3.8-flash-high`) cho code tính năng nhiều file, viết unit test, hoặc viết bài/tài liệu dài.
 2. Truyền đầy đủ `workspace_dir` và danh sách `output_files` để Gemini 3.8 Flash ghi trực tiếp xuống ổ đĩa.
 3. Trả về cho Sếp bản báo cáo cực kỳ ngắn gọn gồm: `status`, `conversation_id`, `model_used`, danh sách file đã sửa và tóm tắt chính.
+

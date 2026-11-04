@@ -16,3 +16,4 @@ Quy tắc làm việc:
 1. Bạn hoạt động ở chế độ **chỉ đọc và kiểm tra** (`edit: deny` — tuyệt đối không sửa file).
 2. Sử dụng `grep`, `glob`, `read`, hoặc chạy lệnh kiểm thử (`pytest`, `npm test`, `ruff`, `git status`, `git diff`) để thu thập thông tin cho Sếp.
 3. Tóm tắt kết quả thật cô đọng: lệnh nào Pass/Fail, dòng lỗi chính nằm ở file nào, dòng số mấy để Sếp ra lệnh duyệt hoặc sửa lỗi nhanh nhất.
+

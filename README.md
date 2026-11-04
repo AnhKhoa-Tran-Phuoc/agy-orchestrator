@@ -49,6 +49,21 @@ Mục tiêu cốt lõi:
 
 ---
 
+## Bộ 6 Multi-Agent Skills tích hợp sẵn (`skills/`)
+
+Được tổng hợp và chuẩn hóa từ các hệ thống Multi-Agent mã nguồn mở hàng đầu trên GitHub (`obra/superpowers`, `oh-my-opencode`, `BMAD-METHOD`, `MetaGPT` và `review-agent` của OpenAI Codex):
+
+| Skill (`skills/<name>/SKILL.md`) | Nguồn tham khảo chính | Công dụng trong hệ thống |
+| :--- | :--- | :--- |
+| `antigravity-manager` | `oh-my-opencode`, `MetaGPT` | Ma trận phân công việc tổng thể giữa Tầng Sếp (`boss-gpt`, `boss-argon`) và Tầng Thợ (`@worker-*`, `delegate_flash_worker`). |
+| `zero-context-planning` | `obra/superpowers` (`writing-plans`), `BMAD-METHOD` | Khuôn mẫu giao việc 5 phần (Mục tiêu, File sở hữu, Giao diện/Ngữ cảnh, Ràng buộc, Báo cáo gọn) giúp các Worker context mới làm trúng ngay lần đầu. |
+| `parallel-agent-dispatch` | `obra/superpowers` (`dispatching-parallel-agents`) | Quy tắc phân vùng file độc lập (*Disjoint File Ownership*) khi chạy song song nhiều Thợ, tránh ghi đè xung đột. |
+| `two-stage-code-review` | `obra/superpowers` (`requesting-code-review`), Codex `review-agent` | Quy trình duyệt code 2 bước: kiểm tra tuân thủ đặc tả + chấm lỗi mức độ ưu tiên `[P0]`–`[P3]` cùng **Gemini 4 Argon High**. |
+| `verification-gate` | `obra/superpowers` (`verification-before-completion`) | Cổng kiểm chứng 5 bước (**IDENTIFY → RUN → READ → VERIFY → CLAIM**): bắt buộc có bằng chứng chạy test thực tế trước khi báo cáo hoàn thành. |
+| `systematic-worker-debugging` | `obra/superpowers` (`systematic-debugging`) | Quy trình 4 pha phối hợp giữa `@worker-nemotron` (tái hiện lỗi), Sếp GPT/Argon (chẩn đoán nguyên nhân gốc) và Thợ Code (viết regression test + sửa lỗi). |
+
+---
+
 ## Cài đặt nhanh
 
 ```powershell
@@ -59,35 +74,23 @@ python -m venv .venv
 .\.venv\Scripts\pip install -e ".[dev]"
 ```
 
-### 1. Cài đặt hệ thống Multi-Agent vào OpenCode (Global hoặc theo Project)
+### 1. Cài đặt toàn bộ 8 Agents + 6 Skills + MCP vào OpenCode
 
 ```powershell
-# Cài đặt Global vào ~/.config/opencode (dùng được cho mọi dự án mở trong OpenCode)
+# Cài đặt Global vào ~/.config/opencode (áp dụng cho mọi dự án trên máy)
 .\.venv\Scripts\agy-orch.exe install-opencode
 
-# Hoặc cài đặt riêng cho 1 thư mục dự án (<project>/opencode.json + .opencode/agents/)
+# Hoặc cài đặt riêng cho 1 thư mục dự án (<project>/opencode.json + .opencode/agents/ + .opencode/skills/)
 .\.venv\Scripts\agy-orch.exe install-opencode --project --target-dir D:\Projects\my-app
 ```
 
-Sau khi cài xong, nếu đang mở OpenCode CLI/Desktop, chỉ cần chạy `opencode reload` (hoặc bấm phím **`Tab`** trong OpenCode) để chuyển sang agent **`boss-gpt`**, **`boss-gpt-sol`** hoặc **`boss-argon`**.
+Sau khi cài xong, chỉ cần chạy `opencode reload` (hoặc bấm phím **`Tab`** trong OpenCode) để chuyển sang agent **`boss-gpt`**, **`boss-gpt-sol`** hoặc **`boss-argon`**.
 
-### 2. Cài đặt vào ChatGPT Desktop / Codex CLI
+### 2. Cài đặt 6 Skills + MCP vào ChatGPT Desktop / Codex CLI
 
 ```powershell
 .\.venv\Scripts\agy-orch.exe install-codex
 ```
-
----
-
-## Cách sử dụng trên OpenCode
-
-1. **Chế độ Sếp Tổng GPT + Hội đồng duyệt code Gemini 4 Argon**:
-   - Bấm `Tab` chọn agent **`boss-gpt`** (hoặc **`boss-gpt-sol`**).
-   - Nhập yêu cầu:
-     > *"Hãy thiết kế và xây dựng module quản lý đơn hàng kèm unit test và tài liệu hướng dẫn tiếng Việt. Hãy hội ý thiết kế và duyệt code cùng `argon_boss_review`, còn việc viết code và viết tài liệu hãy chia cho `@worker-gemini-flash`, `@worker-deepseek` và `@worker-glm`."*
-2. **Chế độ Sếp Gemini 4 Argon (Không tốn 1 token GPT nào)**:
-   - Bấm `Tab` chọn agent **`boss-argon`**.
-   - Nhập yêu cầu: `boss-argon` sẽ tự gọi `gemini-4-argon-high` lập kế hoạch, chia việc cho dàn `@worker-*` Free + `gemini-3.8-flash-high`, rồi dùng `gemini-4-argon-high` chấm điểm và duyệt code (`VERDICT: APPROVED` / `CHANGES_REQUESTED`).
 
 ---
 

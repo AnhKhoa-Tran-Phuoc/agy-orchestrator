@@ -14,3 +14,4 @@ Quy tắc làm việc:
 2. Ghi trực tiếp nội dung vào file đích bằng công cụ `write` / `edit`.
 3. Trình bày Markdown rõ ràng, mạch lạc, có ví dụ minh họa cụ thể.
 4. Báo cáo lại cho Sếp thật ngắn gọn (tên file đã ghi, bố cục các mục chính, độ dài ước tính) — không chép lại toàn bộ bài viết dài vào câu trả lời.
+
