@@ -1,7 +1,7 @@
 """Unit tests for Gemini 4 Argon Boss quota detection, fallback chain, and web handoff."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -104,3 +104,47 @@ async def test_prepare_web_handoff_bundle_writes_markdown_file(tmp_path: Path) -
     saved = Path(bundle["handoff_file"])
     assert saved.is_file()
     assert "Boss Review Request" in saved.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_run_boss_with_fallback_web_auto_extracts_response_hands_free(tmp_path: Path) -> None:
+    fake_agy = tmp_path / "agy.exe"
+    fake_agy.write_text("echo", encoding="utf-8")
+    settings = OrchestratorSettings(agy_bin=fake_agy, default_workspace=tmp_path)
+    runner = AntigravityWorkerRunner(settings=settings)
+
+    quota_fail = WorkerRunResult(
+        run_id="r1",
+        status="ERROR",
+        conversation_id=None,
+        model_used="gemini-4-argon-high",
+        tier="complex",
+        workspace_dir=str(tmp_path),
+        duration_seconds=1.0,
+        num_turns=0,
+        antigravity_usage={},
+        estimated_manager_tokens=20,
+        git_changes_summary="",
+        worker_summary="Weekly quota exhausted",
+    )
+    runner.run_task = AsyncMock(side_effect=[quota_fail, quota_fail, quota_fail])  # type: ignore[method-assign]
+
+    mock_cdp_res = {
+        "status": "SUCCESS",
+        "source": "gemini_web_cdp_automation",
+        "model_used": "gemini-web-pro",
+        "worker_summary": "VERDICT: APPROVED\nReviewed automatically on Gemini Web.",
+        "duration_seconds": 4.2,
+    }
+    with patch("agy_orchestrator.boss_fallback.query_gemini_web_cdp", AsyncMock(return_value=mock_cdp_res)):
+        res = await run_boss_with_fallback(
+            runner=runner,
+            boss_prompt="Review diff automatically",
+            workspace=tmp_path,
+            primary_model="gemini-4-argon-high",
+            on_argon_exhausted="web_auto",
+        )
+    assert res["status"] == "SUCCESS"
+    assert res["model_used"] == "gemini-web-pro"
+    assert "VERDICT: APPROVED" in res["worker_summary"]
+    assert res["fallback_activated"] is True

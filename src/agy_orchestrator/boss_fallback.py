@@ -1,4 +1,4 @@
-"""Quota-aware fallback chain and Gemini Web UI handoff for Google One AI Pro accounts."""
+"""Quota-aware fallback chain and automated Gemini Web CDP bridge for Google One AI Pro accounts."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 import webbrowser
 
+from agy_orchestrator.gemini_web_cdp import query_gemini_web_cdp
 from agy_orchestrator.runner import AntigravityWorkerRunner, WorkerRunResult, WorkerTaskSpec
 
 QUOTA_ERROR_KEYWORDS: tuple[str, ...] = (
@@ -133,49 +134,72 @@ async def run_boss_with_fallback(
     boss_prompt: str,
     workspace: Path,
     primary_model: str = "gemini-4-argon-high",
-    on_argon_exhausted: Literal["web_handoff", "secondary_models"] = "web_handoff",
+    on_argon_exhausted: Literal["web_auto", "web_handoff", "secondary_models"] = "web_auto",
+    use_web_directly: bool = False,
     conversation_id: str | None = None,
     timeout_sec: int = 300,
     open_browser_on_exhaustion: bool = True,
 ) -> dict[str, Any]:
     """Execute a Boss review/planning prompt tailored for a Google One AI Pro account:
 
-    1. Try `gemini-4-argon-high` -> `gemini-4-argon-medium` -> `gemini-4-argon-low` in `agy`.
-    2. When Argon weekly quota is exhausted:
-       - If `on_argon_exhausted="web_handoff"` (default): Immediately copy the prompt + diff
-         to the Windows Clipboard and open `https://gemini.google.com/app` so the user can
-         use their Google Pro Web quota with a single `Ctrl+V`.
-       - If `on_argon_exhausted="secondary_models"`: Automatically continue with
-         `claude-opus-5-5-high` -> `claude-sonnet-5-5-high` -> `gemini-3.8-flash-high` in `agy`
-         before falling back to Web Handoff.
+    1. If `use_web_directly=True`, immediately drive `https://gemini.google.com/app` via Playwright CDP
+       (auto-input prompt and auto-extract response, 100% hands-free).
+    2. Otherwise try `gemini-4-argon-high` -> `gemini-4-argon-medium` -> `gemini-4-argon-low` in `agy`.
+    3. When Argon weekly quota is exhausted:
+       - `on_argon_exhausted="web_auto"` (default): Automatically drive Chrome via CDP (`query_gemini_web_cdp`)
+         to input the prompt on `gemini.google.com/app` and read back the output hands-free!
+       - `on_argon_exhausted="secondary_models"`: Continue with `claude-opus-5-5-high` -> `claude-sonnet-5-5-high`.
+       - `on_argon_exhausted="web_handoff"`: Copy to Clipboard + open browser tab.
     """
     attempted_models: list[str] = []
-    include_secondary = on_argon_exhausted == "secondary_models"
-    chain = get_boss_fallback_chain(
-        primary_model=primary_model,
-        include_secondary_models=include_secondary,
-    )
 
-    for idx, candidate_model in enumerate(chain):
-        attempted_models.append(candidate_model)
-        spec = WorkerTaskSpec(
-            prompt=boss_prompt,
-            workspace_dir=workspace,
-            tier="complex",
-            model=candidate_model,
-            mode="plan",
-            conversation_id=conversation_id if idx == 0 else None,
-            concise_report=False,
-            timeout_sec=timeout_sec,
-            max_summary_chars=3200,
+    if not use_web_directly:
+        include_secondary = on_argon_exhausted == "secondary_models"
+        chain = get_boss_fallback_chain(
+            primary_model=primary_model,
+            include_secondary_models=include_secondary,
         )
-        res: WorkerRunResult = await runner.run_task(spec)
-        if not is_quota_exhausted(res.status, res.worker_summary, res.warnings):
-            payload = res.to_compact_dict()
-            if idx > 0:
-                payload["fallback_activated"] = True
-                payload["attempted_models"] = attempted_models
-            return payload
+
+        for idx, candidate_model in enumerate(chain):
+            attempted_models.append(candidate_model)
+            spec = WorkerTaskSpec(
+                prompt=boss_prompt,
+                workspace_dir=workspace,
+                tier="complex",
+                model=candidate_model,
+                mode="plan",
+                conversation_id=conversation_id if idx == 0 else None,
+                concise_report=False,
+                timeout_sec=timeout_sec,
+                max_summary_chars=3200,
+            )
+            res: WorkerRunResult = await runner.run_task(spec)
+            if not is_quota_exhausted(res.status, res.worker_summary, res.warnings):
+                payload = res.to_compact_dict()
+                if idx > 0:
+                    payload["fallback_activated"] = True
+                    payload["attempted_models"] = attempted_models
+                return payload
+
+    if use_web_directly or on_argon_exhausted == "web_auto":
+        try:
+            web_res = await query_gemini_web_cdp(
+                prompt=boss_prompt,
+                timeout_sec=min(timeout_sec, 180),
+            )
+            web_res["fallback_activated"] = not use_web_directly
+            web_res["attempted_models"] = attempted_models + ["gemini-web-pro"]
+            return web_res
+        except Exception as exc:
+            handoff = await prepare_web_handoff_bundle(
+                prompt=boss_prompt,
+                workspace=workspace,
+                copy_clipboard=True,
+                open_browser=open_browser_on_exhaustion,
+            )
+            handoff["cdp_error"] = str(exc)
+            handoff["attempted_models"] = attempted_models
+            return handoff
 
     handoff = await prepare_web_handoff_bundle(
         prompt=boss_prompt,

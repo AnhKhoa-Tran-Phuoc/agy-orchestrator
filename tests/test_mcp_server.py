@@ -22,6 +22,7 @@ async def test_mcp_server_registers_all_manager_tools_and_prompts(tmp_path: Path
     expected_tools = {
         "list_worker_models",
         "argon_boss_review",
+        "ask_gemini_web_auto",
         "prepare_web_boss_handoff",
         "delegate_flash_worker",
         "delegate_task",

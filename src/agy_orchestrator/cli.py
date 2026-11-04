@@ -11,6 +11,11 @@ from typing import Any
 
 from agy_orchestrator.codex_installer import install_to_codex, uninstall_from_codex
 from agy_orchestrator.config import OrchestratorSettings
+from agy_orchestrator.gemini_web_cdp import (
+    default_chrome_profile_dir,
+    ensure_cdp_browser_running,
+    query_gemini_web_cdp,
+)
 from agy_orchestrator.inspector import (
     inspect_workspace_changes,
     read_file_excerpt,
@@ -150,6 +155,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_oc_uninst.add_argument("--target-dir", default=None, help="Custom OpenCode config or project directory.")
     p_oc_uninst.add_argument("--project", action="store_true", help="Uninstall from project directory.")
 
+    # 13. web-login
+    p_wlogin = sub.add_parser(
+        "web-login",
+        help="Launch the dedicated Chrome CDP window at https://gemini.google.com/app for one-time Google Pro sign-in.",
+    )
+    p_wlogin.add_argument("--port", type=int, default=9222, help="Chrome remote debugging port (default: 9222).")
+
+    # 14. web-ask
+    p_wask = sub.add_parser(
+        "web-ask",
+        help="Hands-free auto-input prompt and auto-extract output from https://gemini.google.com/app via CDP.",
+    )
+    p_wask.add_argument("prompt", help="Prompt to automatically input into Gemini Web.")
+    p_wask.add_argument("--port", type=int, default=9222, help="Chrome remote debugging port (default: 9222).")
+    p_wask.add_argument("--timeout", type=int, default=180, help="Response timeout in seconds.")
+
     return parser
 
 
@@ -265,6 +286,28 @@ async def _dispatch_async(args: argparse.Namespace) -> int:
         target_dir = Path(args.target_dir) if args.target_dir else None
         _print_json(uninstall_from_opencode(target_dir=target_dir, is_project=args.project))
         return 0
+
+    if args.subcommand == "web-login":
+        endpoint = await ensure_cdp_browser_running(cdp_port=args.port)
+        _print_json(
+            {
+                "status": "CHROME_CDP_READY",
+                "cdp_endpoint": endpoint,
+                "profile_dir": str(default_chrome_profile_dir()),
+                "url": "https://gemini.google.com/app",
+                "message": "Cửa sổ Chrome đã mở. Hãy đăng nhập tài khoản Google Pro của bạn 1 lần trên cửa sổ này để lưu phiên tự động.",
+            }
+        )
+        return 0
+
+    if args.subcommand == "web-ask":
+        res = await query_gemini_web_cdp(
+            prompt=args.prompt,
+            cdp_port=args.port,
+            timeout_sec=args.timeout,
+        )
+        _print_json(res)
+        return 0 if res.get("status") == "SUCCESS" else 1
 
     return 1
 

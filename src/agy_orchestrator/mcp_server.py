@@ -15,6 +15,7 @@ from agy_orchestrator.boss_fallback import (
     run_boss_with_fallback,
 )
 from agy_orchestrator.config import OrchestratorSettings
+from agy_orchestrator.gemini_web_cdp import query_gemini_web_cdp
 from agy_orchestrator.inspector import (
     inspect_workspace_changes as _inspect_changes,
     read_file_excerpt as _read_excerpt,
@@ -118,7 +119,8 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         workspace_dir: str | None = None,
         file_paths: list[str] | None = None,
         argon_level: Literal["high", "medium", "low"] = "high",
-        on_argon_exhausted: Literal["web_handoff", "secondary_models"] = "web_handoff",
+        on_argon_exhausted: Literal["web_auto", "web_handoff", "secondary_models"] = "web_auto",
+        use_web_directly: bool = False,
         conversation_id: str | None = None,
         timeout_sec: int = 300,
     ) -> dict[str, Any]:
@@ -165,9 +167,28 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
             workspace=target_ws,
             primary_model=explicit_model,
             on_argon_exhausted=on_argon_exhausted,
+            use_web_directly=use_web_directly,
             conversation_id=conversation_id,
             timeout_sec=timeout_sec,
             open_browser_on_exhaustion=True,
+        )
+
+    @mcp.tool(
+        description=(
+            "Hands-free Gemini Web automation via Chrome DevTools Protocol (CDP): "
+            "automatically types `prompt` into `https://gemini.google.com/app` (logged into the user's "
+            "Google Pro account), submits it, waits for streaming to finish, and extracts the response text."
+        )
+    )
+    async def ask_gemini_web_auto(
+        prompt: str,
+        timeout_sec: int = 180,
+        cdp_port: int = 9222,
+    ) -> dict[str, Any]:
+        return await query_gemini_web_cdp(
+            prompt=prompt,
+            cdp_port=cdp_port,
+            timeout_sec=timeout_sec,
         )
 
     @mcp.tool(
