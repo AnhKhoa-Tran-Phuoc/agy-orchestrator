@@ -10,6 +10,7 @@ import sys
 from typing import Any
 
 MANAGED_AGENT_FILES: tuple[str, ...] = (
+    "build.md",
     "boss-gpt.md",
     "boss-gpt-sol.md",
     "boss-argon.md",
@@ -157,6 +158,10 @@ def install_to_opencode(
             dst_skill_folder = skills_dst_dir / sname
             dst_skill_folder.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_skills_dir / sname / "SKILL.md", dst_skill_folder / "SKILL.md")
+
+        repo_agents_md = src_agents_dir.parent / "AGENTS.md"
+        if repo_agents_md.is_file():
+            shutil.copy2(repo_agents_md, base_dir / "AGENTS.md")
 
     return {
         "dry_run": dry_run,
