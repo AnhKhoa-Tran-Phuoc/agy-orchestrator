@@ -153,7 +153,11 @@ async def run_boss_with_fallback(
     """
     attempted_models: list[str] = []
 
-    if not use_web_directly:
+    runner.pool.ensure_healthy_account()
+    active_acc = runner.pool.get_active_account()
+    can_try_cli_argon = active_acc.has_agy_argon and not use_web_directly
+
+    if can_try_cli_argon:
         include_secondary = on_argon_exhausted == "secondary_models"
         chain = get_boss_fallback_chain(
             primary_model=primary_model,
@@ -186,6 +190,7 @@ async def run_boss_with_fallback(
             web_res = await query_gemini_web_cdp(
                 prompt=boss_prompt,
                 timeout_sec=min(timeout_sec, 180),
+                pool=runner.pool,
             )
             web_res["fallback_activated"] = not use_web_directly
             web_res["attempted_models"] = attempted_models + ["gemini-web-pro"]

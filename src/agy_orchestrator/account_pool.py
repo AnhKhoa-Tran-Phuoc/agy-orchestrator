@@ -71,6 +71,7 @@ class AccountEntry:
     email: str = ""
     cdp_port: int = 9222
     chrome_profile_dir: str = ""
+    has_agy_argon: bool = False
     limit_5h_tokens: int = DEFAULT_5H_TOKEN_LIMIT
     limit_weekly_tokens: int = DEFAULT_WEEKLY_TOKEN_LIMIT
     limit_5h_runs: int = DEFAULT_5H_RUN_LIMIT
@@ -128,6 +129,8 @@ class AccountEntry:
             "email": self.email,
             "cdp_port": self.cdp_port,
             "chrome_profile_dir": self.chrome_profile_dir,
+            "has_agy_argon": self.has_agy_argon,
+            "mode": "cli_and_web" if self.has_agy_argon else "web_only",
             "tokens_5h": tokens_5h,
             "runs_5h": runs_5h,
             "pct_5h": pct_5h,
@@ -183,6 +186,7 @@ class AccountPoolManager:
                 email="primary-google-pro",
                 cdp_port=9222,
                 chrome_profile_dir=self._default_profile_dir_for("acc-1"),
+                has_agy_argon=True,
             )
             self.accounts = {"acc-1": default_acc}
             self.active_account_id = "acc-1"
@@ -206,6 +210,7 @@ class AccountPoolManager:
                 chrome_profile_dir=str(
                     item.get("chrome_profile_dir") or self._default_profile_dir_for(acc_id)
                 ),
+                has_agy_argon=bool(item.get("has_agy_argon", acc_id == "acc-1")),
                 limit_5h_tokens=int(item.get("limit_5h_tokens", DEFAULT_5H_TOKEN_LIMIT)),
                 limit_weekly_tokens=int(
                     item.get("limit_weekly_tokens", DEFAULT_WEEKLY_TOKEN_LIMIT)
@@ -248,6 +253,7 @@ class AccountPoolManager:
         account_id: str,
         email: str = "",
         cdp_port: int | None = None,
+        has_agy_argon: bool | None = None,
         limit_5h_tokens: int = DEFAULT_5H_TOKEN_LIMIT,
         limit_weekly_tokens: int = DEFAULT_WEEKLY_TOKEN_LIMIT,
     ) -> AccountEntry:
@@ -259,6 +265,8 @@ class AccountPoolManager:
                 acc.email = email
             if cdp_port is not None:
                 acc.cdp_port = cdp_port
+            if has_agy_argon is not None:
+                acc.has_agy_argon = has_agy_argon
             acc.limit_5h_tokens = limit_5h_tokens
             acc.limit_weekly_tokens = limit_weekly_tokens
         else:
@@ -271,6 +279,7 @@ class AccountPoolManager:
                 email=email,
                 cdp_port=next_port,
                 chrome_profile_dir=self._default_profile_dir_for(acc_id),
+                has_agy_argon=bool(has_agy_argon) if has_agy_argon is not None else (acc_id == "acc-1"),
                 limit_5h_tokens=limit_5h_tokens,
                 limit_weekly_tokens=limit_weekly_tokens,
             )
@@ -419,3 +428,4 @@ class AccountPoolManager:
             "accounts": accounts_metrics,
             "recent_swaps": self.swap_events[-10:],
         }
+

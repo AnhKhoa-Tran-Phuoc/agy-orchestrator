@@ -207,6 +207,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_alogin.add_argument("account_id", help="Account identifier (e.g. acc-1, acc-2).")
 
+    # 19. setup-web-accounts
+    p_setup_web = sub.add_parser(
+        "setup-web-accounts",
+        help="Create N account slots (acc-1 with CLI+Web, acc-2..acc-N as Web-only) and open their Chrome login windows.",
+    )
+    p_setup_web.add_argument(
+        "--count",
+        type=int,
+        default=2,
+        help="Total number of Google accounts to set up and open for one-time sign-in (default: 2).",
+    )
+    p_setup_web.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Register the account slots without launching Chrome windows immediately.",
+    )
+
     return parser
 
 
@@ -401,6 +418,47 @@ async def _dispatch_async(args: argparse.Namespace) -> int:
                 "message": (
                     f"Đã mở cửa sổ Chrome riêng cho `{acc.account_id}` (port {acc.cdp_port}). "
                     "Hãy đăng nhập tài khoản Google tương ứng trên cửa sổ này 1 lần duy nhất."
+                ),
+            }
+        )
+        return 0
+
+    if args.subcommand == "setup-web-accounts":
+        count = max(1, min(args.count, 10))
+        opened_windows: list[dict[str, Any]] = []
+        for idx in range(1, count + 1):
+            acc_id = f"acc-{idx}"
+            is_primary = idx == 1
+            acc = runner.pool.add_or_update_account(
+                account_id=acc_id,
+                email="primary-google-pro (CLI+Web)" if is_primary else f"web-google-acc-{idx}",
+                cdp_port=9221 + idx,
+                has_agy_argon=is_primary,
+            )
+            endpoint = None
+            if not args.no_open:
+                endpoint = await ensure_cdp_browser_running(
+                    cdp_port=acc.cdp_port,
+                    profile_dir=Path(acc.chrome_profile_dir),
+                )
+            opened_windows.append(
+                {
+                    "account_id": acc.account_id,
+                    "mode": "cli_and_web" if acc.has_agy_argon else "web_only",
+                    "cdp_port": acc.cdp_port,
+                    "cdp_endpoint": endpoint,
+                    "profile_dir": acc.chrome_profile_dir,
+                }
+            )
+        _print_json(
+            {
+                "status": "MULTI_ACCOUNT_SETUP_READY",
+                "total_accounts": count,
+                "accounts": opened_windows,
+                "instructions": (
+                    "Mỗi tài khoản (`acc-1`, `acc-2`, ...) có 1 cửa sổ Chrome độc lập riêng biệt. "
+                    "Hãy đăng nhập từng tài khoản Google vào đúng cửa sổ Chrome của nó 1 lần duy nhất. "
+                    "`acc-1` sẽ dùng cả Argon trên Antigravity CLI lẫn Web; từ `acc-2` trở đi hệ thống tự biết chỉ chạy trên Web!"
                 ),
             }
         )
