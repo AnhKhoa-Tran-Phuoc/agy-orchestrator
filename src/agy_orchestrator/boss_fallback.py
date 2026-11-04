@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 from typing import Any
+import urllib.request
 import webbrowser
-
-import httpx
 
 from agy_orchestrator.runner import AntigravityWorkerRunner, WorkerRunResult, WorkerTaskSpec
 
@@ -84,20 +84,22 @@ async def call_google_ai_studio_web_api(
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
 
     payload = {
-        "contents": [{" role": "user", "parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2},
     }
-    # Fix role key whitespace
-    payload["contents"] = [{"role": "user", "parts": [{"text": prompt}]}]
+    body_bytes = json.dumps(payload).encode("utf-8")
 
-    async with httpx.AsyncClient(timeout=timeout_sec) as client:
-        resp = await client.post(
+    def _sync_post() -> dict[str, Any]:
+        req = urllib.request.Request(
             url,
+            data=body_bytes,
             headers={"x-goog-api-key": resolved_key, "Content-Type": "application/json"},
-            json=payload,
+            method="POST",
         )
-        resp.raise_for_status()
-        data = resp.json()
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    data = await asyncio.to_thread(_sync_post)
 
     candidates = data.get("candidates") or []
     parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
