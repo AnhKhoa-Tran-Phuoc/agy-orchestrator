@@ -36,7 +36,7 @@ def test_tier_routing_picks_quota_efficient_models() -> None:
 
     assert registry.resolve_from_catalog(catalog, tier="trivial") == "gemini-3.8-flash-low"
     assert registry.resolve_from_catalog(catalog, tier="writing") == "gemini-3.8-flash-high"
-    assert registry.resolve_from_catalog(catalog, tier="coding") == "gemini-4-argon-medium"
+    assert registry.resolve_from_catalog(catalog, tier="coding") == "gemini-3.8-flash-high"
     assert registry.resolve_from_catalog(catalog, tier="complex") == "gemini-4-argon-high"
 
 

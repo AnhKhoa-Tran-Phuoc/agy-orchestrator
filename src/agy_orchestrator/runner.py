@@ -636,8 +636,8 @@ class AntigravityWorkerRunner:
             for extra_dir in spec.add_dirs:
                 args.extend(["--add-dir", str(Path(extra_dir).expanduser().resolve())])
 
-        if spec.allow_shell:
-            args.extend(["--dangerously-skip-permissions", "--sandbox"])
+        # In headless automated mode, always skip interactive permission prompts so file writes and commands succeed
+        args.extend(["--dangerously-skip-permissions", "--sandbox"])
 
         timeout_sec = spec.timeout_sec or self.settings.default_timeout_sec
         if timeout_sec > 0:

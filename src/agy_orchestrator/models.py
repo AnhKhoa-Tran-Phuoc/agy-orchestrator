@@ -38,9 +38,9 @@ TIER_PREFERENCE_RULES: dict[TaskTier, list[tuple[str, ...]]] = {
         ("sonnet", "low"),
     ],
     "coding": [
-        ("argon", "medium"),
-        ("sonnet", "medium"),
         ("flash", "high"),
+        ("flash", "medium"),
+        ("argon", "medium"),
         ("sonnet", "high"),
         ("argon", "high"),
     ],
@@ -56,7 +56,7 @@ TIER_PREFERENCE_RULES: dict[TaskTier, list[tuple[str, ...]]] = {
 FALLBACK_MODELS_BY_TIER: dict[TaskTier, str] = {
     "trivial": "gemini-3.8-flash-low",
     "writing": "gemini-3.8-flash-high",
-    "coding": "gemini-4-argon-medium",
+    "coding": "gemini-3.8-flash-high",
     "complex": "gemini-4-argon-high",
 }
 
