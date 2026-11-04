@@ -28,6 +28,10 @@ from agy_orchestrator.runner import (
     EffortLevel,
     ExecutionMode,
     WorkerTaskSpec,
+    init_or_sync_git_repo,
+    load_project_state_digest,
+    rollback_to_git_checkpoint,
+    save_project_state,
 )
 
 # Ensure logging never touches stdout (reserved strictly for MCP stdio JSON-RPC frames)
@@ -131,6 +135,9 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         if file_paths:
             files_clause = "\nFocus files: " + ", ".join(f"`{p}`" for p in file_paths)
 
+        state_digest = load_project_state_digest(target_ws, cfg.state_dir_name)
+        state_clause = f"\n\n[PROJECT STATE MEMORY (.agy-orch/STATE.md)]\n{state_digest}" if state_digest else ""
+
         if review_type in ("plan", "architecture"):
             boss_prompt = (
                 "[ROLE: GEMINI 4 ARGON — CHIEF ARCHITECT & BOSS]\n"
@@ -144,7 +151,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
                 "   - `worker-mimo` (OpenCode Free): UI components, boilerplate, JSON/YAML/config files\n"
                 "   - `worker-nemotron` (OpenCode Free): test execution, codebase search & verification\n"
                 "3. Explicit acceptance criteria & verification commands.\n\n"
-                f"Request:\n{task_context}{files_clause}"
+                f"Request:\n{task_context}{files_clause}{state_clause}"
             )
         else:
             diff_snapshot = await _inspect_changes(
@@ -158,7 +165,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
                 "Start your response with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`.\n"
                 "List any bugs, edge cases, security issues, or style violations with exact file/line references "
                 "and concise fix instructions for the workers.\n\n"
-                f"Task / Requirements:\n{task_context}{files_clause}\n\n"
+                f"Task / Requirements:\n{task_context}{files_clause}{state_clause}\n\n"
                 f"Current Workspace Changes Snapshot:\n{diff_snapshot}"
             )
 
@@ -234,7 +241,8 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
     @mcp.tool(
         description=(
             "Delegate coding, writing, or refactoring work specifically to a Gemini 3.8 Flash worker "
-            "('gemini-3.8-flash-high', 'gemini-3.8-flash-medium', or 'gemini-3.8-flash-low') in 'accept-edits' mode."
+            "('gemini-3.8-flash-high', 'gemini-3.8-flash-medium', or 'gemini-3.8-flash-low') in 'accept-edits' mode, "
+            "with optional closed-loop `verify_command` Reflexion and Circuit Breaker protection."
         )
     )
     async def delegate_flash_worker(
@@ -245,6 +253,9 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         conversation_id: str | None = None,
         allow_shell: bool = False,
         timeout_sec: int = 300,
+        verify_command: str | None = None,
+        max_reflexion_retries: int = 2,
+        rollback_on_circuit_breaker: bool = False,
     ) -> dict[str, Any]:
         explicit_model = f"gemini-3.8-flash-{flash_level}"
         tier: TaskTier = "trivial" if flash_level == "low" else "writing"
@@ -258,6 +269,9 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
             mode="accept-edits",
             allow_shell=allow_shell,
             timeout_sec=timeout_sec,
+            verify_command=verify_command,
+            max_reflexion_retries=max_reflexion_retries,
+            rollback_on_circuit_breaker=rollback_on_circuit_breaker,
         )
         result = await runner.run_task(spec)
         return result.to_compact_dict()
@@ -279,6 +293,9 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         mode: ExecutionMode = "accept-edits",
         allow_shell: bool = False,
         timeout_sec: int = 300,
+        verify_command: str | None = None,
+        max_reflexion_retries: int = 2,
+        rollback_on_circuit_breaker: bool = False,
     ) -> dict[str, Any]:
         spec = WorkerTaskSpec(
             prompt=prompt,
@@ -290,6 +307,9 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
             mode=mode,
             allow_shell=allow_shell,
             timeout_sec=timeout_sec,
+            verify_command=verify_command,
+            max_reflexion_retries=max_reflexion_retries,
+            rollback_on_circuit_breaker=rollback_on_circuit_breaker,
         )
         result = await runner.run_task(spec)
         return result.to_compact_dict()
@@ -483,6 +503,60 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
             target_account_id=target_account_id,
             reason=reason,
         )
+
+    @mcp.tool(
+        description=(
+            "Save or update the persistent project state memory file (`.agy-orch/STATE.md`) with current "
+            "architectural decisions, completed milestones, and next tasks. Automatically injected into "
+            "future Worker and Boss runs even after `/compact` or restarting the session."
+        )
+    )
+    def update_project_state(
+        summary_markdown: str,
+        workspace_dir: str | None = None,
+    ) -> dict[str, Any]:
+        target_ws = cfg.resolve_workspace(workspace_dir)
+        saved_file = save_project_state(target_ws, summary_markdown, cfg.state_dir_name)
+        return {
+            "saved": True,
+            "state_file": str(saved_file),
+            "chars": len(summary_markdown),
+        }
+
+    @mcp.tool(
+        description=(
+            "Ensure `workspace_dir` is initialized as a Git repository (`git init`), optionally create a "
+            "milestone commit (`commit_message`), create a remote GitHub repository (`repo_name` via `gh repo create`), "
+            "and push checkpoints to `origin` so project progress and `.agy-orch/STATE.md` are backed up on GitHub."
+        )
+    )
+    async def init_or_sync_github_project(
+        workspace_dir: str | None = None,
+        repo_name: str | None = None,
+        private: bool = True,
+        commit_message: str | None = None,
+        push: bool = False,
+    ) -> dict[str, Any]:
+        target_ws = cfg.resolve_workspace(workspace_dir)
+        return await init_or_sync_git_repo(
+            workspace=target_ws,
+            repo_name=repo_name,
+            private=private,
+            commit_message=commit_message,
+            push=push,
+        )
+
+    @mcp.tool(
+        description=(
+            "Rollback tracked files in `workspace_dir` to a `git_checkpoint_sha` captured before a worker task."
+        )
+    )
+    async def rollback_workspace_checkpoint(
+        checkpoint_sha: str,
+        workspace_dir: str | None = None,
+    ) -> dict[str, Any]:
+        target_ws = cfg.resolve_workspace(workspace_dir)
+        return await rollback_to_git_checkpoint(target_ws, checkpoint_sha)
 
     @mcp.prompt(
         name="manager_mode",

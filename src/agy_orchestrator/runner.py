@@ -14,6 +14,7 @@ import uuid
 from agy_orchestrator.account_pool import AccountPoolManager, classify_quota_window_error
 from agy_orchestrator.config import OrchestratorSettings
 from agy_orchestrator.gemini_web_cdp import extract_and_write_web_files, query_gemini_web_cdp
+from agy_orchestrator.inspector import run_verification_check
 from agy_orchestrator.models import ModelRegistry, TaskTier
 
 EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
@@ -37,6 +38,9 @@ class WorkerTaskSpec:
     concise_report: bool = True
     timeout_sec: int | None = None
     max_summary_chars: int | None = None
+    verify_command: str | None = None
+    max_reflexion_retries: int = 2
+    rollback_on_circuit_breaker: bool = False
 
 
 @dataclass(slots=True)
@@ -59,6 +63,10 @@ class WorkerRunResult:
     warnings: list[str] = field(default_factory=list)
     active_account_id: str | None = None
     account_swapped: bool = False
+    git_checkpoint_sha: str | None = None
+    verification_passed: bool | None = None
+    reflexion_attempts: int = 0
+    circuit_breaker_tripped: bool = False
 
     def to_compact_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -72,6 +80,14 @@ class WorkerRunResult:
             payload.pop("account_swapped", None)
         if not self.active_account_id:
             payload.pop("active_account_id", None)
+        if not self.git_checkpoint_sha:
+            payload.pop("git_checkpoint_sha", None)
+        if self.verification_passed is None:
+            payload.pop("verification_passed", None)
+        if not self.reflexion_attempts:
+            payload.pop("reflexion_attempts", None)
+        if not self.circuit_breaker_tripped:
+            payload.pop("circuit_breaker_tripped", None)
         return payload
 
 
@@ -136,14 +152,59 @@ def parse_agy_json_stdout(raw_stdout: str, raw_stderr: str = "") -> tuple[dict[s
     )
 
 
+def load_project_state_digest(
+    workspace: Path | None,
+    state_dir_name: str = ".agy-orch",
+    max_chars: int = 700,
+) -> str:
+    """Load a compact digest of `.agy-orch/STATE.md` (or `STATE.md`) for persistent memory injection."""
+    if workspace is None:
+        return ""
+    candidates = [
+        workspace / state_dir_name / "STATE.md",
+        workspace / "STATE.md",
+    ]
+    for path in candidates:
+        if path.is_file():
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                if len(text) > max_chars:
+                    return text[:max_chars].rstrip() + "\n...[STATE.md truncated]..."
+                return text
+            except Exception:
+                continue
+    return ""
+
+
+def save_project_state(
+    workspace: Path,
+    summary_markdown: str,
+    state_dir_name: str = ".agy-orch",
+) -> Path:
+    """Persist architectural decisions, milestones, and active tasks to `.agy-orch/STATE.md`."""
+    state_dir = workspace / state_dir_name
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "STATE.md"
+    state_file.write_text(summary_markdown.strip() + "\n", encoding="utf-8")
+    return state_file
+
+
 def build_worker_prompt(
     task_prompt: str,
     output_files: list[str] | None = None,
     concise_report: bool = True,
     is_continuation: bool = False,
+    state_digest: str = "",
 ) -> str:
-    """Wrap the Manager's task prompt with quota-protecting worker rules."""
+    """Wrap the Manager's task prompt with quota-protecting worker rules and optional STATE.md memory."""
     sections: list[str] = []
+
+    if state_digest.strip() and not is_continuation:
+        sections.append(
+            f"[PROJECT STATE MEMORY (.agy-orch/STATE.md)]\n{state_digest.strip()}\n"
+        )
 
     if is_continuation:
         sections.append("[MANAGER REVIEW / FOLLOW-UP INSTRUCTION]")
@@ -183,6 +244,243 @@ def truncate_for_manager(text: str, max_chars: int, full_output_path: Path | Non
     pointer = f" (full output saved at {full_output_path})" if full_output_path else ""
     truncated = f"{head}\n\n...[truncated {omitted} chars to save Manager quota{pointer}]...\n\n{tail}"
     return truncated, True
+
+
+def _has_git_repo(workspace: Path) -> bool:
+    if (workspace / ".git").exists():
+        return True
+    return any((parent / ".git").exists() for parent in workspace.parents)
+
+
+async def _create_git_checkpoint(workspace: Path) -> str | None:
+    """Create a non-destructive Git checkpoint SHA (`git stash create` or `HEAD`) before worker edits."""
+    if not _has_git_repo(workspace):
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "stash",
+            "create",
+            cwd=str(workspace),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout_b, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        sha = stdout_b.decode("utf-8", errors="replace").strip()
+        if proc.returncode == 0 and sha:
+            return sha
+
+        proc_head = await asyncio.create_subprocess_exec(
+            "git",
+            "rev-parse",
+            "HEAD",
+            cwd=str(workspace),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        head_b, _ = await asyncio.wait_for(proc_head.communicate(), timeout=5)
+        head_sha = head_b.decode("utf-8", errors="replace").strip()
+        if proc_head.returncode == 0 and head_sha:
+            return head_sha
+    except Exception:
+        pass
+    return None
+
+
+async def rollback_to_git_checkpoint(workspace: Path, checkpoint_sha: str) -> dict[str, Any]:
+    """Restore tracked files in `workspace` to `checkpoint_sha` (`git checkout <sha> -- .`)."""
+    if not checkpoint_sha or not _has_git_repo(workspace):
+        return {"rolled_back": False, "reason": "No git repo or checkpoint SHA available."}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "checkout",
+            checkpoint_sha.strip(),
+            "--",
+            ".",
+            cwd=str(workspace),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode == 0:
+            return {"rolled_back": True, "checkpoint_sha": checkpoint_sha.strip()}
+        return {
+            "rolled_back": False,
+            "checkpoint_sha": checkpoint_sha.strip(),
+            "reason": stderr_b.decode("utf-8", errors="replace").strip(),
+        }
+    except Exception as exc:
+        return {"rolled_back": False, "checkpoint_sha": checkpoint_sha, "reason": str(exc)}
+
+
+async def init_or_sync_git_repo(
+    workspace: Path,
+    repo_name: str | None = None,
+    private: bool = True,
+    commit_message: str | None = None,
+    push: bool = False,
+) -> dict[str, Any]:
+    """Ensure `workspace` is a Git repo, optionally commit changes, create a GitHub repo via `gh`, and push."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    initialized_git = False
+
+    if not _has_git_repo(workspace):
+        proc_init = await asyncio.create_subprocess_exec(
+            "git",
+            "init",
+            "-b",
+            "main",
+            cwd=str(workspace),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc_init.communicate(), timeout=10)
+        initialized_git = proc_init.returncode == 0
+
+    gitignore = workspace / ".gitignore"
+    ignore_rule = ".agy-orch/runs/\n__pycache__/\n.venv/\n"
+    if not gitignore.is_file():
+        gitignore.write_text(ignore_rule, encoding="utf-8")
+    else:
+        existing_ig = gitignore.read_text(encoding="utf-8", errors="replace")
+        if ".agy-orch/runs/" not in existing_ig:
+            gitignore.write_text(existing_ig.rstrip() + "\n.agy-orch/runs/\n", encoding="utf-8")
+
+    committed = False
+    commit_sha: str | None = None
+    if commit_message:
+        proc_add = await asyncio.create_subprocess_exec(
+            "git",
+            "add",
+            "-A",
+            cwd=str(workspace),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc_add.communicate(), timeout=10)
+        proc_commit = await asyncio.create_subprocess_exec(
+            "git",
+            "commit",
+            "-m",
+            commit_message,
+            cwd=str(workspace),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc_commit.communicate(), timeout=15)
+        committed = proc_commit.returncode == 0
+        head_sha = await _create_git_checkpoint(workspace)
+        commit_sha = head_sha
+
+    github_created = False
+    remote_url = ""
+    if repo_name:
+        proc_rem = await asyncio.create_subprocess_exec(
+            "git",
+            "remote",
+            "get-url",
+            "origin",
+            cwd=str(workspace),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        rem_b, _ = await asyncio.wait_for(proc_rem.communicate(), timeout=5)
+        if proc_rem.returncode == 0 and rem_b.decode("utf-8", errors="replace").strip():
+            remote_url = rem_b.decode("utf-8", errors="replace").strip()
+        else:
+            visibility = "--private" if private else "--public"
+            try:
+                proc_gh = await asyncio.create_subprocess_exec(
+                    "gh",
+                    "repo",
+                    "create",
+                    repo_name,
+                    visibility,
+                    "--source=.",
+                    "--remote=origin",
+                    cwd=str(workspace),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                gh_out, _ = await asyncio.wait_for(proc_gh.communicate(), timeout=25)
+                if proc_gh.returncode == 0:
+                    github_created = True
+                    remote_url = gh_out.decode("utf-8", errors="replace").strip()
+            except Exception:
+                pass
+
+    pushed = False
+    if push:
+        try:
+            proc_push = await asyncio.create_subprocess_exec(
+                "git",
+                "push",
+                "-u",
+                "origin",
+                "HEAD",
+                cwd=str(workspace),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc_push.communicate(), timeout=30)
+            pushed = proc_push.returncode == 0
+        except Exception:
+            pushed = False
+
+    return {
+        "workspace_dir": str(workspace),
+        "initialized_git": initialized_git,
+        "committed": committed,
+        "commit_sha": commit_sha,
+        "github_repo_created": github_created,
+        "remote_url": remote_url,
+        "pushed": pushed,
+    }
+
+
+def partition_non_overlapping_waves(
+    specs: list[WorkerTaskSpec],
+) -> list[list[tuple[int, WorkerTaskSpec, list[str]]]]:
+    """Partition parallel tasks into waves so no two tasks in the same wave touch the same output file."""
+    waves: list[list[tuple[int, WorkerTaskSpec, list[str]]]] = []
+    wave_claimed_files: list[set[str]] = []
+
+    for idx, spec in enumerate(specs):
+        norm_files = {
+            p.strip().replace("\\", "/").lstrip("./").lower()
+            for p in (spec.output_files or [])
+            if p and p.strip()
+        }
+        placed = False
+        for wave_idx, claimed in enumerate(wave_claimed_files):
+            overlap = sorted(norm_files.intersection(claimed))
+            if not overlap:
+                claimed.update(norm_files)
+                overlap_with_prev: list[str] = []
+                if wave_idx > 0:
+                    prev_claimed = wave_claimed_files[wave_idx - 1]
+                    overlap_with_prev = sorted(norm_files.intersection(prev_claimed))
+                waves[wave_idx].append((idx, spec, overlap_with_prev))
+                placed = True
+                break
+        if not placed:
+            overlap_with_prev = []
+            if wave_claimed_files:
+                overlap_with_prev = sorted(norm_files.intersection(wave_claimed_files[-1]))
+            wave_claimed_files.append(set(norm_files))
+            waves.append([(idx, spec, overlap_with_prev)])
+
+    return waves
 
 
 async def _capture_git_summary(workspace: Path) -> str:
@@ -348,31 +646,16 @@ class AntigravityWorkerRunner:
         args.extend(["-p", wrapped_prompt])
         return args
 
-    async def run_task(self, spec: WorkerTaskSpec) -> WorkerRunResult:
-        """Execute a single task on an Antigravity worker model and auto-swap account on 5h/weekly quota."""
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
-        workspace = self.settings.resolve_workspace(spec.workspace_dir)
-
-        # 1. Pre-check 5-hour & weekly quota on active account; auto-swap if >= 85% or in cooldown
-        pre_check = self.pool.ensure_healthy_account()
-        account_swapped = bool(pre_check.get("swapped"))
-        active_acc_id = self.pool.active_account_id
-
-        resolved_model = await self.registry.resolve_model(
-            tier=spec.tier,
-            explicit_model=spec.model,
-        )
-
-        wrapped_prompt = build_worker_prompt(
-            task_prompt=spec.prompt,
-            output_files=spec.output_files,
-            concise_report=spec.concise_report,
-            is_continuation=bool(spec.conversation_id),
-        )
+    async def _execute_single_cli_pass(
+        self,
+        spec: WorkerTaskSpec,
+        workspace: Path,
+        resolved_model: str,
+        wrapped_prompt: str,
+        timeout_sec: int,
+    ) -> tuple[dict[str, Any], list[str], int | None]:
+        """Run a single `agy` CLI subprocess pass and parse its JSON stdout."""
         cmd_args = self.build_cli_args(spec, resolved_model, wrapped_prompt)
-        timeout_sec = spec.timeout_sec or self.settings.default_timeout_sec
-        max_chars = spec.max_summary_chars or self.settings.max_summary_chars
-
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
 
@@ -412,20 +695,48 @@ class AntigravityWorkerRunner:
         else:
             parsed, warnings = parse_agy_json_stdout(raw_stdout, raw_stderr)
 
+        return parsed, warnings, proc.returncode
+
+    async def run_task(self, spec: WorkerTaskSpec) -> WorkerRunResult:
+        """Execute a single task on an Antigravity worker model with Git checkpoint, Reflexion, and Circuit Breaker."""
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+        workspace = self.settings.resolve_workspace(spec.workspace_dir)
+
+        # 0. Capture non-destructive Git checkpoint SHA before worker edits & load STATE.md digest
+        checkpoint_sha = await _create_git_checkpoint(workspace)
+        state_digest = load_project_state_digest(workspace, self.settings.state_dir_name)
+
+        # 1. Pre-check 5-hour & weekly quota on active account; auto-swap if >= 85% or in cooldown
+        pre_check = self.pool.ensure_healthy_account()
+        account_swapped = bool(pre_check.get("swapped"))
+        active_acc_id = self.pool.active_account_id
+
+        resolved_model = await self.registry.resolve_model(
+            tier=spec.tier,
+            explicit_model=spec.model,
+        )
+
+        wrapped_prompt = build_worker_prompt(
+            task_prompt=spec.prompt,
+            output_files=spec.output_files,
+            concise_report=spec.concise_report,
+            is_continuation=bool(spec.conversation_id),
+            state_digest=state_digest,
+        )
+        timeout_sec = spec.timeout_sec or self.settings.default_timeout_sec
+        max_chars = spec.max_summary_chars or self.settings.max_summary_chars
+
+        parsed, warnings, returncode = await self._execute_single_cli_pass(
+            spec=spec,
+            workspace=workspace,
+            resolved_model=resolved_model,
+            wrapped_prompt=wrapped_prompt,
+            timeout_sec=timeout_sec,
+        )
+
         raw_response = str(parsed.get("response") or "").strip()
         state_dir = self._state_dir(workspace)
         full_md_path = state_dir / "runs" / f"{run_id}.md"
-
-        worker_summary, was_truncated = truncate_for_manager(
-            raw_response,
-            max_chars=max_chars,
-            full_output_path=full_md_path,
-        )
-
-        saved_path_str: str | None = None
-        if was_truncated or len(raw_response) > 600:
-            full_md_path.write_text(raw_response, encoding="utf-8")
-            saved_path_str = str(full_md_path)
 
         raw_usage = parsed.get("usage")
         usage_dict: dict[str, int] = {}
@@ -434,8 +745,7 @@ class AntigravityWorkerRunner:
                 if isinstance(v, (int, float)):
                     usage_dict[k] = int(v)
 
-        git_summary = await _capture_git_summary(workspace)
-        status_str = str(parsed.get("status") or ("SUCCESS" if proc.returncode == 0 else "ERROR"))
+        status_str = str(parsed.get("status") or ("SUCCESS" if returncode == 0 else "ERROR"))
 
         # 2. Record 5h & weekly rolling token usage on the active account
         total_tok = int(usage_dict.get("total_tokens", 0))
@@ -451,7 +761,6 @@ class AntigravityWorkerRunner:
         is_argon_model = "argon" in resolved_model.lower()
         if status_str.upper() != "SUCCESS" and quota_err_window is not None:
             if is_argon_model:
-                # Do NOT mark acc-1's 3.8 Flash quota exhausted when only Argon CLI hits its limit!
                 warnings.append(
                     f"[ARGON-CLI-QUOTA] Account `{active_acc_id}` hit {quota_err_window} Argon CLI limit on `{resolved_model}`; "
                     "3.8 Flash on Antigravity CLI remains active."
@@ -473,7 +782,7 @@ class AntigravityWorkerRunner:
                         f"rotated Antigravity CLI to `{active_acc_id}`."
                     )
 
-                # Upgrade 3: Hands-free fallback to 3-Account Gemini Web CDP Pool for Worker Flash tasks
+                # Hands-free fallback to 3-Account Gemini Web CDP Pool for Worker Flash tasks
                 web_prompt = spec.prompt.strip()
                 if spec.output_files:
                     file_tags_instr = "\n".join(
@@ -507,15 +816,6 @@ class AntigravityWorkerRunner:
                         active_acc_id = str(web_res.get("account_id") or active_acc_id)
                         account_swapped = True
                         raw_response = web_text
-                        worker_summary, was_truncated = truncate_for_manager(
-                            raw_response,
-                            max_chars=max_chars,
-                            full_output_path=full_md_path,
-                        )
-                        if was_truncated or len(raw_response) > 600:
-                            full_md_path.write_text(raw_response, encoding="utf-8")
-                            saved_path_str = str(full_md_path)
-                        git_summary = await _capture_git_summary(workspace)
                         warnings.append(
                             f"[WEB-CDP-FALLBACK] Antigravity CLI hit {quota_err_window} Flash quota; "
                             f"completed task via Gemini Web CDP (`{active_acc_id}`) and wrote {len(written_files)} file(s): {written_files}."
@@ -532,18 +832,136 @@ class AntigravityWorkerRunner:
                     f"rotated to `{active_acc_id}` for subsequent runs."
                 )
 
+        # 4. Closed-Loop Worker Reflexion & Circuit Breaker when `spec.verify_command` is provided
+        verification_passed: bool | None = None
+        reflexion_attempts = 0
+        circuit_breaker_tripped = False
+        conv_id = str(parsed.get("conversation_id") or spec.conversation_id or "").strip() or None
+
+        if spec.verify_command and status_str.upper() == "SUCCESS":
+            prev_failure_sig = ""
+            max_retries = max(0, int(spec.max_reflexion_retries))
+            while True:
+                v_res = await run_verification_check(
+                    workspace_dir=workspace,
+                    command=spec.verify_command,
+                    timeout_sec=min(120, timeout_sec),
+                    max_output_chars=2000,
+                )
+                if v_res.get("passed"):
+                    verification_passed = True
+                    break
+
+                verification_passed = False
+                fail_digest = str(v_res.get("output_digest") or "").strip()
+                failure_sig = fail_digest[:400]
+
+                if reflexion_attempts >= max_retries or (prev_failure_sig and failure_sig == prev_failure_sig):
+                    circuit_breaker_tripped = True
+                    status_str = "CIRCUIT_BREAKER_TRIPPED"
+                    reason = (
+                        "identical error repeated consecutively"
+                        if (prev_failure_sig and failure_sig == prev_failure_sig)
+                        else f"exceeded max_reflexion_retries={max_retries}"
+                    )
+                    warnings.append(
+                        f"[CIRCUIT-BREAKER] Verification `{spec.verify_command}` failed ({reason}). Halting worker loop."
+                    )
+                    if spec.rollback_on_circuit_breaker and checkpoint_sha:
+                        rb = await rollback_to_git_checkpoint(workspace, checkpoint_sha)
+                        if rb.get("rolled_back"):
+                            warnings.append(
+                                f"[AUTO-ROLLBACK] Restored workspace to pre-task checkpoint `{checkpoint_sha[:10]}`."
+                            )
+                    raw_response = (
+                        f"{raw_response}\n\n[VERIFICATION FAILED — CIRCUIT BREAKER TRIPPED]\n"
+                        f"Command: `{spec.verify_command}`\nOutput:\n{fail_digest}"
+                    ).strip()
+                    break
+
+                prev_failure_sig = failure_sig
+                reflexion_attempts += 1
+                reflexion_prompt = (
+                    f"[REFLEXION SELF-CORRECTION LOOP — ATTEMPT {reflexion_attempts}/{max_retries}]\n"
+                    f"Verification command `{spec.verify_command}` failed with exit_code={v_res.get('exit_code')}.\n"
+                    f"Failure log:\n{fail_digest}\n\n"
+                    "Instructions:\n"
+                    "1. State a 1-sentence root-cause hypothesis explaining why the test/check failed.\n"
+                    "2. Fix the bug directly on disk inside the workspace.\n"
+                    "3. Summarize the fix in <= 4 bullets."
+                )
+                retry_spec = WorkerTaskSpec(
+                    prompt=reflexion_prompt,
+                    workspace_dir=workspace,
+                    tier=spec.tier,
+                    model=resolved_model.split("->")[0],
+                    effort=spec.effort,
+                    mode=spec.mode,
+                    conversation_id=conv_id,
+                    output_files=spec.output_files,
+                    add_dirs=spec.add_dirs,
+                    allow_shell=spec.allow_shell,
+                    concise_report=True,
+                    timeout_sec=timeout_sec,
+                    max_summary_chars=max_chars,
+                )
+                retry_wrapped = build_worker_prompt(
+                    task_prompt=reflexion_prompt,
+                    output_files=spec.output_files,
+                    concise_report=True,
+                    is_continuation=True,
+                )
+                r_parsed, r_warnings, r_code = await self._execute_single_cli_pass(
+                    spec=retry_spec,
+                    workspace=workspace,
+                    resolved_model=retry_spec.model or resolved_model,
+                    wrapped_prompt=retry_wrapped,
+                    timeout_sec=timeout_sec,
+                )
+                warnings.extend(r_warnings)
+                conv_id = str(r_parsed.get("conversation_id") or conv_id or "").strip() or None
+                r_resp = str(r_parsed.get("response") or "").strip()
+                if r_resp:
+                    raw_response = r_resp
+                r_usage = r_parsed.get("usage")
+                if isinstance(r_usage, dict):
+                    for k, v in r_usage.items():
+                        if isinstance(v, (int, float)):
+                            usage_dict[k] = usage_dict.get(k, 0) + int(v)
+                    extra_tok = int(r_usage.get("total_tokens", 0))
+                    if extra_tok > 0:
+                        self.pool.record_usage(
+                            tokens=extra_tok,
+                            model=resolved_model,
+                            account_id=active_acc_id,
+                        )
+                if r_code != 0 and str(r_parsed.get("status", "")).upper() != "SUCCESS":
+                    break
+
+        worker_summary, was_truncated = truncate_for_manager(
+            raw_response,
+            max_chars=max_chars,
+            full_output_path=full_md_path,
+        )
+
+        saved_path_str: str | None = None
+        if was_truncated or len(raw_response) > 600:
+            full_md_path.write_text(raw_response, encoding="utf-8")
+            saved_path_str = str(full_md_path)
+
+        git_summary = await _capture_git_summary(workspace)
         approx_mgr_chars = len(worker_summary) + len(git_summary) + 160
         est_mgr_tokens = max(1, approx_mgr_chars // 4)
 
         result = WorkerRunResult(
             run_id=run_id,
             status=status_str,
-            conversation_id=parsed.get("conversation_id") or spec.conversation_id,
+            conversation_id=conv_id,
             model_used=resolved_model,
             tier=spec.tier,
             workspace_dir=str(workspace),
             duration_seconds=round(float(parsed.get("duration_seconds") or 0.0), 3),
-            num_turns=int(parsed.get("num_turns") or 0),
+            num_turns=int(parsed.get("num_turns") or 0) + reflexion_attempts,
             antigravity_usage=usage_dict,
             estimated_manager_tokens=est_mgr_tokens,
             git_changes_summary=git_summary,
@@ -552,6 +970,10 @@ class AntigravityWorkerRunner:
             warnings=warnings,
             active_account_id=active_acc_id,
             account_swapped=account_swapped,
+            git_checkpoint_sha=checkpoint_sha,
+            verification_passed=verification_passed,
+            reflexion_attempts=reflexion_attempts,
+            circuit_breaker_tripped=circuit_breaker_tripped,
         )
 
         self._append_ledger(workspace, result)
@@ -562,12 +984,28 @@ class AntigravityWorkerRunner:
         specs: list[WorkerTaskSpec],
         max_concurrency: int | None = None,
     ) -> list[WorkerRunResult]:
-        """Run multiple independent worker tasks concurrently to maximize throughput."""
+        """Run multiple worker tasks concurrently while serializing any tasks with overlapping `output_files`."""
         limit = max(1, min(max_concurrency or self.settings.max_parallel_workers, 6))
         semaphore = asyncio.Semaphore(limit)
+        waves = partition_non_overlapping_waves(specs)
+        ordered_results: dict[int, WorkerRunResult] = {}
 
-        async def _bounded_run(item: WorkerTaskSpec) -> WorkerRunResult:
+        async def _bounded_run(
+            orig_idx: int,
+            item: WorkerTaskSpec,
+            overlap_files: list[str],
+        ) -> None:
             async with semaphore:
-                return await self.run_task(item)
+                res = await self.run_task(item)
+                if overlap_files:
+                    res.warnings.append(
+                        f"[FILE-COLLISION-GUARD] Serialized after earlier wave due to overlapping output_files: {overlap_files}"
+                    )
+                ordered_results[orig_idx] = res
 
-        return list(await asyncio.gather(*(_bounded_run(s) for s in specs)))
+        for wave in waves:
+            await asyncio.gather(
+                *(_bounded_run(orig_idx, item, overlap_files) for orig_idx, item, overlap_files in wave)
+            )
+
+        return [ordered_results[i] for i in range(len(specs))]

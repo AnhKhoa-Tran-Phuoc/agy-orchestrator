@@ -9,15 +9,23 @@ Every turn in an LLM conversation re-sends the entire prior message history. By 
 
 ---
 
-## 1. Externalize State to Disk (`.agy-orch/STATE.md`)
+## 1. Externalize State to Disk (`.agy-orch/STATE.md`) & Auto-Inject Memory
 
 Instead of relying on long chat history to remember completed tasks, architecture decisions, and worker `conversation_id`s:
 
-1. After each completed milestone (or every 4–5 tasks), instruct **`@worker-glm`** (`opencode/glm-5.3-flash-free` — 0 cost) to update `.agy-orch/STATE.md` with:
+1. Call MCP `update_project_state(summary_markdown=...)` or instruct **`@worker-glm`** (`opencode/glm-5.3-flash-free` — 0 cost) to update `.agy-orch/STATE.md` with:
+   - **Architecture & Tech Stack Decisions**
    - **Completed Milestones & Files**
    - **Active Worker `conversation_id`s**
    - **Pending Tasks & Next Immediate Step**
-2. Keep `.agy-orch/STATE.md` under **60 lines** so it can be read in a single `read_file_excerpt` call whenever needed.
+2. `AntigravityWorkerRunner` and `argon_boss_review` **automatically inject `.agy-orch/STATE.md` (up to 700 chars)** into every new Worker and Boss prompt so agents retain full project continuity after `/compact` or across sessions.
+
+---
+
+## 2. Automatic Git Init & GitHub Milestone Backup (`init_or_sync_github_project`)
+
+1. **Project Start**: When starting a new project workspace, call MCP `init_or_sync_github_project(repo_name="<project-name>", private=True, commit_message="chore: initial project scaffold", push=True)` so the workspace is immediately tracked by Git (enabling pre-task `git_checkpoint_sha` rollback) and backed up to GitHub.
+2. **After Every Verified Milestone**: Update `.agy-orch/STATE.md` via `update_project_state`, then call `init_or_sync_github_project(commit_message="feat: ...", push=True)` before recommending `/compact`.
 
 ---
 

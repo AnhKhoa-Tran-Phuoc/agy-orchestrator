@@ -1,15 +1,23 @@
-"""Unit tests for the headless Antigravity worker runner and quota ledger."""
+"""Unit tests for the headless Antigravity worker runner, Reflexion loop, Circuit Breaker, and Git/State helpers."""
 
 import json
 from pathlib import Path
+import pytest
 
+from agy_orchestrator.account_pool import AccountPoolManager
 from agy_orchestrator.config import OrchestratorSettings
+from agy_orchestrator.models import ModelRegistry
 from agy_orchestrator.runner import (
     AntigravityWorkerRunner,
     WorkerRunResult,
     WorkerTaskSpec,
     build_worker_prompt,
+    init_or_sync_git_repo,
+    load_project_state_digest,
     parse_agy_json_stdout,
+    partition_non_overlapping_waves,
+    rollback_to_git_checkpoint,
+    save_project_state,
     truncate_for_manager,
 )
 
@@ -69,7 +77,6 @@ def test_build_cli_args_and_quota_ledger(tmp_path: Path) -> None:
     assert "--mode" in args
     assert "accept-edits" in args
 
-    # Record two synthetic runs in the ledger and verify offloading ratio calculation
     sample_run = WorkerRunResult(
         run_id="run_test_1",
         status="SUCCESS",
@@ -93,3 +100,115 @@ def test_build_cli_args_and_quota_ledger(tmp_path: Path) -> None:
     assert stats["offload_percentage"] > 99.0
     assert stats["by_model"]["gemini-3.8-flash-low"]["runs"] == 1
     assert json.dumps(sample_run.to_compact_dict())
+
+
+def test_state_md_persistence_and_auto_injection(tmp_path: Path) -> None:
+    saved = save_project_state(tmp_path, "## Milestone 1\n- Auth module complete.")
+    assert saved.is_file()
+    digest = load_project_state_digest(tmp_path)
+    assert "Auth module complete." in digest
+
+    wrapped = build_worker_prompt(
+        task_prompt="Add logout endpoint",
+        output_files=["src/auth.py"],
+        state_digest=digest,
+    )
+    assert "[PROJECT STATE MEMORY (.agy-orch/STATE.md)]" in wrapped
+    assert "Auth module complete." in wrapped
+
+
+def test_partition_non_overlapping_waves_prevents_file_collisions() -> None:
+    specs = [
+        WorkerTaskSpec(prompt="Task A", output_files=["src/auth.py", "src/common.py"]),
+        WorkerTaskSpec(prompt="Task B", output_files=["src/ui.tsx"]),
+        WorkerTaskSpec(prompt="Task C", output_files=["src/common.py", "tests/test_common.py"]),
+    ]
+    waves = partition_non_overlapping_waves(specs)
+    assert len(waves) == 2
+    assert [idx for idx, _, _ in waves[0]] == [0, 1]
+    assert [idx for idx, _, _ in waves[1]] == [2]
+    assert waves[1][0][2] == ["src/common.py"]
+
+
+@pytest.mark.asyncio
+async def test_worker_reflexion_loop_and_circuit_breaker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_agy = tmp_path / "agy.cmd"
+    fake_agy.write_text("@echo off\n", encoding="utf-8")
+    pool = AccountPoolManager(pool_file=tmp_path / "pool.json")
+    settings = OrchestratorSettings(agy_bin=fake_agy, default_workspace=tmp_path)
+    runner = AntigravityWorkerRunner(settings=settings, registry=ModelRegistry(fake_agy), pool=pool)
+
+    cli_calls = 0
+
+    async def _fake_cli_pass(self, **kwargs):
+        nonlocal cli_calls
+        cli_calls += 1
+        return (
+            {
+                "status": "SUCCESS",
+                "conversation_id": "conv-reflex-1",
+                "response": f"Completed pass {cli_calls}",
+                "duration_seconds": 1.2,
+                "num_turns": 1,
+                "usage": {"total_tokens": 500},
+            },
+            [],
+            0,
+        )
+
+    verify_calls = 0
+
+    async def _fake_verify_pass_on_second(workspace_dir, command, **kwargs):
+        nonlocal verify_calls
+        verify_calls += 1
+        if verify_calls == 1:
+            return {"passed": False, "exit_code": 1, "output_digest": "AssertionError: expected 2 == 3"}
+        return {"passed": True, "exit_code": 0, "output_digest": "1 passed"}
+
+    monkeypatch.setattr(AntigravityWorkerRunner, "_execute_single_cli_pass", _fake_cli_pass)
+    monkeypatch.setattr("agy_orchestrator.runner.run_verification_check", _fake_verify_pass_on_second)
+
+    spec = WorkerTaskSpec(
+        prompt="Implement math",
+        workspace_dir=tmp_path,
+        verify_command="pytest -q",
+        max_reflexion_retries=2,
+    )
+    res = await runner.run_task(spec)
+    assert res.status == "SUCCESS"
+    assert res.verification_passed is True
+    assert res.reflexion_attempts == 1
+    assert res.circuit_breaker_tripped is False
+
+    # Now test Circuit Breaker tripping when identical error repeats consecutively
+    async def _fake_verify_always_same_error(workspace_dir, command, **kwargs):
+        return {"passed": False, "exit_code": 1, "output_digest": "SyntaxError: invalid syntax at line 10"}
+
+    monkeypatch.setattr("agy_orchestrator.runner.run_verification_check", _fake_verify_always_same_error)
+    res_cb = await runner.run_task(spec)
+    assert res_cb.status == "CIRCUIT_BREAKER_TRIPPED"
+    assert res_cb.circuit_breaker_tripped is True
+    assert res_cb.verification_passed is False
+    assert any("[CIRCUIT-BREAKER]" in w for w in res_cb.warnings)
+
+
+@pytest.mark.asyncio
+async def test_git_init_and_checkpoint_rollback(tmp_path: Path) -> None:
+    ws = tmp_path / "sample_repo"
+    ws.mkdir()
+    app_py = ws / "app.py"
+    app_py.write_text("v = 1\n", encoding="utf-8")
+
+    sync_res = await init_or_sync_git_repo(ws, commit_message="chore: init", push=False)
+    assert sync_res["initialized_git"] is True
+    assert sync_res["committed"] is True
+    checkpoint = sync_res["commit_sha"]
+    assert checkpoint
+
+    # Corrupt file and rollback to checkpoint
+    app_py.write_text("v = 'BROKEN'\n", encoding="utf-8")
+    rb = await rollback_to_git_checkpoint(ws, checkpoint)
+    assert rb["rolled_back"] is True
+    assert app_py.read_text(encoding="utf-8").strip() == "v = 1"
