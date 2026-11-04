@@ -165,8 +165,9 @@ def install_to_opencode(
         if repo_agents_md.is_file():
             shutil.copy2(repo_agents_md, base_dir / "AGENTS.md")
 
-        # If installing into the real global OpenCode directory, also notify the live OpenCode service
-        if target_dir is None or base_dir == default_opencode_global_dir().resolve():
+        # Notify the live OpenCode service when installing globally or into a non-temp project directory
+        is_temp_test = "pytest" in str(base_dir).lower() or "temp" in str(base_dir).lower()
+        if not is_temp_test:
             oc_cli = shutil.which("opencode") or shutil.which("opencode-cli")
             if not oc_cli and os.name == "nt":
                 roaming = os.environ.get("APPDATA", "")
@@ -174,16 +175,16 @@ def install_to_opencode(
                 if cand.is_file():
                     oc_cli = str(cand)
             if oc_cli:
-                cmd = [
-                    oc_cli,
-                    "mcp",
-                    "add",
-                    "--global",
-                    "--env",
-                    "PYTHONIOENCODING=utf-8",
-                ]
+                cmd = [oc_cli, "mcp", "add"]
+                if not is_project:
+                    cmd.append("--global")
+                cmd.extend(["--env", "PYTHONIOENCODING=utf-8"])
                 if agy_bin is not None:
                     cmd.extend(["--env", f"AGY_BIN={agy_bin.resolve()}"])
+                if is_project:
+                    cmd.extend(["--env", f"AGY_DEFAULT_WORKSPACE={base_dir}"])
+                elif default_workspace is not None:
+                    cmd.extend(["--env", f"AGY_DEFAULT_WORKSPACE={default_workspace.resolve()}"])
                 cmd.extend(
                     [
                         "antigravity_workers",
@@ -196,6 +197,7 @@ def install_to_opencode(
                 try:
                     subprocess.run(
                         cmd,
+                        cwd=str(base_dir),
                         stdin=subprocess.DEVNULL,
                         capture_output=True,
                         timeout=8,
