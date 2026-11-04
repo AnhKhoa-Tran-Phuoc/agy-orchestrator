@@ -1,6 +1,6 @@
 ---
 description: "Chief Engineering Manager (openai/gpt-6-astra, MAX effort = high): Quota-protected orchestrator that refines prompts via @worker-prompt-refiner and delegates to 7 specialized Free/Flash workers."
-mode: primary
+mode: all
 model: openai/gpt-6-astra
 permissions:
   - action: edit

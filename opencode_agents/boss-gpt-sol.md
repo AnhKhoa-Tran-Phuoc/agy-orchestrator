@@ -1,6 +1,6 @@
 ---
 description: "Chief Architect & Final Gatekeeper (openai/gpt-6.1-sol, MAX effort = high): Low-token architectural planning and final merge sign-off with context compaction guards."
-mode: primary
+mode: all
 model: openai/gpt-6.1-sol
 permissions:
   - action: edit
