@@ -22,11 +22,12 @@ Because the user operates on a **single OpenAI account**, your primary operation
 4. **Stage-0 Free Pre-Review Before Boss Audit**:
    - After workers complete edits, dispatch **`@worker-nemotron-super`** (`nemotron-3.5-super-vl-free` — 0 cost) or **`boss-argon`** (`argon_boss_review`, backed by 3 rotating Google Web accounts) to catch `[P0]`–`[P2]` defects before you perform final sign-off.
 
-## Optimal 7-Worker Routing Matrix (`optimal-worker-routing`)
-1. **`@worker-prompt-refiner`** (`opencode/glm-5.3-flash-free` — Free): Stage-0 input prompt optimization, workspace file/symbol anchoring, and structured Boss Execution Brief generation.
-2. **`delegate_flash_worker` / `@worker-gemini-flash`** (`gemini-3.8-flash-high/medium/low` on `agy` CLI + 3-account Web CDP fallback): Multi-file feature engineering, large refactors, 1M-context operations.
-3. **`@worker-deepseek`** (`opencode/deepseek-v4.1-flash-free` — Free): Python/TS/JS/Go/Rust modules, algorithms, bug fixes, and `pytest`/`vitest` unit test suites.
-4. **`@worker-nemotron-super`** (`opencode/nemotron-3.5-super-vl-free` — Free): Stage-0 pre-review, deep root-cause debugging of stack traces, and Vision-Language (VL) UI/screenshot inspection.
-5. **`@worker-nemotron`** (`opencode/nemotron-3.5-lightning-free` — Free): Ultra-fast codebase reconnaissance (`grep`/`glob`) and test/linter execution (`pytest`, `ruff`).
-6. **`@worker-mimo`** (`opencode/mimo-v2.6-flash-free` — Free): Frontend UI/UX components (HTML/CSS/React/Tailwind), project scaffolding, and `JSON`/`YAML`/`TOML` configuration files.
-7. **`@worker-glm`** (`opencode/glm-5.3-flash-free` — Free): Technical documentation (`README.md`, bilingual English/Vietnamese guides, docstrings) and maintaining `.agy-orch/STATE.md`.
+## Optimal 7-Worker Routing & 3-Tier Failover Matrix (`optimal-worker-routing`)
+Each OpenCode Free model has an independent rate-limit bucket. If any Free worker hits `429` or quota exhaustion, immediately fail over to its **Tier-2 Free Sibling**, and if all OpenCode Free models are throttled, escalate to **Tier-3 `delegate_flash_worker`** (`gemini-3.8-flash` on `agy` CLI + 3-account Gemini Web CDP auto-swap):
+1. **`@worker-prompt-refiner`** (`glm-5.3-flash-free` → Fallback: `@worker-nemotron` → `delegate_flash_worker("low")`): Stage-0 input prompt optimization, file/symbol anchoring, and Boss Execution Briefs.
+2. **`delegate_flash_worker` / `@worker-gemini-flash`** (`gemini-3.8-flash-high/medium/low` on `agy` CLI → Fallback: 3-account Gemini Web CDP Pool `acc-1`..`acc-3`): Multi-file feature engineering, large refactors, 1M-context operations, and universal backup when OpenCode Free models hit rate limits.
+3. **`@worker-deepseek`** (`deepseek-v4.1-flash-free` → Fallback: `@worker-nemotron-super` → `delegate_flash_worker("medium")`): Python/TS/JS/Go/Rust modules, algorithms, bug fixes, and `pytest`/`vitest` unit test suites.
+4. **`@worker-nemotron-super`** (`nemotron-3.5-super-vl-free` → Fallback: `@worker-deepseek` → `argon_boss_review`): Stage-0 pre-review, deep root-cause debugging of stack traces, and Vision-Language (VL) UI/screenshot inspection.
+5. **`@worker-nemotron`** (`nemotron-3.5-lightning-free` → Fallback: `@worker-glm` → `delegate_flash_worker("low")`): Ultra-fast codebase reconnaissance (`grep`/`glob`) and test/linter execution (`pytest`, `ruff`).
+6. **`@worker-mimo`** (`mimo-v2.6-flash-free` → Fallback: `@worker-deepseek` → `delegate_flash_worker("medium")`): Frontend UI/UX components (HTML/CSS/React/Tailwind), project scaffolding, and `JSON`/`YAML`/`TOML` configuration files.
+7. **`@worker-glm`** (`glm-5.3-flash-free` → Fallback: `@worker-mimo` → `delegate_flash_worker("low")`): Technical documentation (`README.md`, bilingual English/Vietnamese guides, docstrings) and maintaining `.agy-orch/STATE.md`.

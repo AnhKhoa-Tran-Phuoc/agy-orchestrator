@@ -27,3 +27,4 @@ When a Boss receives a vague prompt (e.g., *"thêm chức năng X"* or *"fix l�
 - **[RECOMMENDED WORKER ROUTING]**: `<@worker-deepseek | @worker-gemini-flash | @worker-mimo | ...>`
 - **[VERIFICATION GATE]**: `<exact pytest / linter command>`
 ```
+
