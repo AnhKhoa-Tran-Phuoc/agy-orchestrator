@@ -13,6 +13,7 @@ MANAGED_AGENT_FILES: tuple[str, ...] = (
     "boss-gpt.md",
     "boss-gpt-sol.md",
     "boss-argon.md",
+    "worker-prompt-refiner.md",
     "worker-gemini-flash.md",
     "worker-deepseek.md",
     "worker-glm.md",
@@ -32,6 +33,7 @@ MANAGED_SKILL_DIRS: tuple[str, ...] = (
     "context-compaction-guard",
     "optimal-worker-routing",
     "quota-monitor",
+    "prompt-refiner",
 )
 
 

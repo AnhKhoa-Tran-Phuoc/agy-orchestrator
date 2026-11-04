@@ -64,13 +64,14 @@
 
 ---
 
-## The 9 OpenCode Agents (`opencode_agents/`)
+## The 10 OpenCode Agents (`opencode_agents/`)
 
 | Agent ID | Mode | Underlying Model | Primary Responsibility |
 | :--- | :---: | :--- | :--- |
 | **`boss-gpt`** | `primary` | `openai/gpt-6-astra` *(max `high`)* | Chief Engineering Manager; decomposes goals, dispatches workers, enforces verification gates (`edit: deny`). |
 | **`boss-gpt-sol`** | `primary` | `openai/gpt-6.1-sol` *(max `high`)* | Chief Architect & Final Reviewer; audits diffs and signs off after Stage-0/Stage-1 checks (`edit: deny`). |
 | **`boss-argon`** | `all` | `gemini-4-argon-high` *(CLI + Web CDP)* | Senior Architect & Defect-First Reviewer (`[P0]`–`[P3]`); auto-rotates across CLI and Chrome CDP Web accounts. |
+| **`worker-prompt-refiner`** | `all` | `opencode/glm-5.3-flash-free` | Stage-0 Prompt Optimizer & Context Scout; transforms raw Vietnamese/English prompts into codebase-aware Boss Execution Briefs (**Free**). |
 | **`worker-gemini-flash`** | `subagent` | `gemini-3.8-flash-high/medium/low` | Heavy multi-file implementation, cross-cutting refactors, and 1M-context codebase operations via `agy`. |
 | **`worker-deepseek`** | `subagent` | `opencode/deepseek-v4.1-flash-free` | Pure algorithmic coding (Python/TS/JS/Go/Rust), bug fixes, and `pytest`/`vitest` unit test generation (**Free**). |
 | **`worker-nemotron-super`** | `subagent` | `opencode/nemotron-3.5-super-vl-free` | Stage-0 Pre-Reviewer, deep root-cause stack-trace debugger, and multimodal UI/screenshot inspector (**Free**). |
@@ -85,9 +86,11 @@
 | Skill Name | Reference Lineage | Purpose |
 | :--- | :--- | :--- |
 | **`antigravity-manager`** | `oh-my-opencode`, `MetaGPT` | Master orchestration matrix between Bosses and specialized Workers. |
+| **`prompt-refiner`** | Custom Prompt Engineering | Stage-0 prompt optimization that anchors file paths & symbols via `@worker-prompt-refiner` at zero OpenAI token cost. |
+| **`quota-monitor`** | Custom Quota Engineering | Real-time per-model 5-hour (`5h`) and 7-day (`weekly`) quota telemetry dashboard (`agy-orch quota`). |
 | **`openai-quota-shield`** | Custom Quota Engineering | Caps OpenAI reasoning effort at `high`, bans raw file reads into Manager context, and enforces Stage-0 free pre-review. |
 | **`context-compaction-guard`** | Custom Context Engineering | Externalizes session state to `.agy-orch/STATE.md` via free workers and triggers `/compact` checkpoints every 6–8 turns. |
-| **`optimal-worker-routing`** | Benchmark Routing Matrix | Assigns every subtask to the highest-performing model across the 6-Worker lineup at minimum token cost. |
+| **`optimal-worker-routing`** | Benchmark Routing Matrix | Assigns every subtask to the highest-performing model across the 7-Worker lineup at minimum token cost. |
 | **`zero-context-planning`** | `obra/superpowers`, `BMAD-METHOD` | Mandatory 5-part self-contained specification template for fresh-context worker subagents. |
 | **`parallel-agent-dispatch`** | `obra/superpowers` | Enforces disjoint file ownership when running concurrent worker batches. |
 | **`two-stage-code-review`** | `obra/superpowers`, OpenAI Codex | Two-stage audit: Spec Compliance check followed by `[P0]`–`[P3]` defect classification. |
