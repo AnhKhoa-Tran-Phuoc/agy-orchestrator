@@ -13,7 +13,7 @@ authors = [
     { name = "KokaTran98", email = "kokatran98@gmail.com" }
 ]
 dependencies = [
-    "mcp>=1.6.0",
+    "mcp>=2.0.0",
     "tomli-w>=1.0.0",
 ]
 
@@ -33,3 +33,4 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
