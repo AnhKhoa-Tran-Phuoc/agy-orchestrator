@@ -196,28 +196,60 @@ async def _query_single_cdp_instance(
                 ),
             }
 
-        responses_loc = page.locator(RESPONSE_SELECTORS)
-        initial_count = await responses_loc.count()
-        initial_last_text = ""
-        if initial_count > 0:
-            try:
-                initial_last_text = (await responses_loc.nth(initial_count - 1).inner_text()).strip()
-            except Exception:
-                initial_last_text = ""
+        read_dom_state_js = """() => {
+            const nodes = document.querySelectorAll(
+                'model-response message-content, model-response .model-response-text, message-content, model-response, .markdown'
+            );
+            const count = nodes.length;
+            const lastText = count > 0 ? (nodes[count - 1].innerText || '').trim() : '';
+            const stopBtn = document.querySelector(
+                'button[aria-label*="Stop" i], button[aria-label*="Dừng" i], button.stop-button'
+            );
+            const isGenerating = !!(stopBtn && stopBtn.offsetParent !== null);
+            return { count, lastText, isGenerating };
+        }"""
 
-        # Focus input box, clear any leftover draft, and insert the full prompt
-        await input_box.click()
-        await page.keyboard.press("Control+A")
-        await page.keyboard.press("Backspace")
-        await page.keyboard.insert_text(prompt)
-        await asyncio.sleep(0.4)
+        init_state = await page.evaluate(read_dom_state_js)
+        initial_count = int(init_state.get("count", 0))
+        initial_last_text = str(init_state.get("lastText", ""))
 
-        # Click Send button or press Enter
-        send_btn = page.locator(SEND_BUTTON_SELECTORS).first
-        if await send_btn.count() > 0 and await send_btn.is_visible():
-            await send_btn.click()
-        else:
-            await page.keyboard.press("Enter")
+        # Dismiss any first-time welcome modal / Angular CDK overlay backdrop if present
+        try:
+            await page.evaluate(
+                """() => {
+                    const modalBtns = document.querySelectorAll('.cdk-overlay-container button');
+                    modalBtns.forEach(b => { try { b.click(); } catch (e) {} });
+                    const backdrops = document.querySelectorAll('.cdk-overlay-backdrop-showing, .cdk-overlay-pane');
+                    backdrops.forEach(el => { try { el.remove(); } catch (e) {} });
+                }"""
+            )
+            await asyncio.sleep(0.3)
+        except Exception:
+            pass
+
+        # Fill the contenteditable rich-textarea directly (fires input/change events in Angular)
+        try:
+            await input_box.fill(prompt, timeout=8000)
+        except Exception:
+            await input_box.click(force=True)
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
+            await page.keyboard.insert_text(prompt)
+
+        await asyncio.sleep(0.6)
+
+        # Click Send button via JS or press Enter
+        sent = await page.evaluate(
+            """() => {
+                const btn = document.querySelector(
+                    'button.send-button:not([disabled]), button[aria-label*="Send" i]:not([disabled]), button[aria-label*="Gửi" i]:not([disabled])'
+                );
+                if (btn) { btn.click(); return true; }
+                return false;
+            }"""
+        )
+        if not sent:
+            await input_box.press("Enter")
 
         # Poll for the new model response to appear and finish streaming
         deadline = time.perf_counter() + max(15, timeout_sec)
@@ -226,28 +258,19 @@ async def _query_single_cdp_instance(
 
         while time.perf_counter() < deadline:
             await asyncio.sleep(1.0)
-            current_count = await responses_loc.count()
-            if current_count == 0:
-                continue
-
-            latest_node = responses_loc.nth(current_count - 1)
             try:
-                current_text = (await latest_node.inner_text()).strip()
+                cur_state = await page.evaluate(read_dom_state_js)
             except Exception:
                 continue
 
-            # Ensure we are looking at a newly generated response, not the old one
-            if current_count == initial_count and current_text == initial_last_text:
-                continue
-            if not current_text:
-                continue
+            current_count = int(cur_state.get("count", 0))
+            current_text = str(cur_state.get("lastText", ""))
+            is_generating = bool(cur_state.get("isGenerating", False))
 
-            stop_btn = page.locator(STOP_BUTTON_SELECTORS).first
-            is_generating = False
-            try:
-                is_generating = (await stop_btn.count() > 0) and (await stop_btn.is_visible())
-            except Exception:
-                is_generating = False
+            if current_count == 0 or not current_text:
+                continue
+            if current_count <= initial_count and current_text == initial_last_text:
+                continue
 
             if current_text == last_text and not is_generating:
                 stable_ticks += 1
