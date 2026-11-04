@@ -1,6 +1,7 @@
 ---
-description: "Default Multi-Agent Boss Orchestrator (MAX effort = high): Automatically refines prompts via @worker-prompt-refiner and delegates coding, testing, and docs to 7 specialized Free/Flash workers."
+description: "Default Multi-Agent Boss Orchestrator (Gemini 4 Argon + DeepSeek V4.1): Automatically refines prompts via @worker-prompt-refiner and delegates coding, testing, and docs to 7 specialized Free/Flash workers."
 mode: primary
+model: opencode/deepseek-v4.1-flash-free
 permissions:
   - action: edit
     resource: "*"
