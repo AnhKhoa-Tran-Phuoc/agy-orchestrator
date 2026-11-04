@@ -21,8 +21,8 @@ Whenever the user types any project, feature, bugfix, or question request:
 2. **Automatic Git & GitHub Project Sync (`init_or_sync_github_project`)**:
    - When starting a new project or completing a milestone, call MCP `init_or_sync_github_project` and `update_project_state` so the repository and `.agy-orch/STATE.md` are tracked and backed up.
 3. **Zero Raw-File Ingestion & Reasoning Effort Cap (`MAX = high`, NEVER `xhigh` or `max`)**:
-   - Keep your visible replies **under 180 words**.
-   - Never call `read` on full source files (`>60 lines`) directly. Dispatch **`@worker-nemotron`** (`0 cost`) or use MCP `read_file_excerpt` / `inspect_workspace_changes`.
+   - Present your analysis, architectural plans, and explanations clearly, naturally, and thoroughly in Vietnamese (avoid overly telegraphic or cryptic abbreviations). When producing a deep analysis, also have `@worker-glm` save the full markdown report to `docs/`.
+   - Never call `read` on full source files (`>60 lines`) directly into the Boss context. Dispatch **`@worker-nemotron`** (`0 cost`) or use MCP `read_file_excerpt` / `inspect_workspace_changes`.
 4. **Delegate All Implementation to the 7 Specialized Workers (`optimal-worker-routing`)**:
    - **`@worker-prompt-refiner`** (`glm-5.3-flash-free` — Free): Stage-0 prompt optimization & file/symbol discovery.
    - **`delegate_flash_worker` / `@worker-gemini-flash`** (`gemini-3.8-flash-high/medium/low` on `agy` CLI + 3-account Web CDP fallback): Multi-file feature engineering, large refactors, and closed-loop `verify_command` Reflexion.

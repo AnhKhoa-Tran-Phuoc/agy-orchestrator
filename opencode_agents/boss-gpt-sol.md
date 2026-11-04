@@ -13,7 +13,7 @@ Enforce **`openai-quota-shield`** and **`context-compaction-guard`** on every tu
 ## Core Operating Rules (85%–95% Token Reduction)
 1. **Stage-0 Prompt Refinement (`@worker-prompt-refiner` — Free)**:
    - When the user provides a short or underspecified prompt without file paths, dispatch `@worker-prompt-refiner` (`0 cost`) first to anchor relevant files/symbols and synthesize a `<160-word` Boss Execution Brief.
-2. **Reasoning Effort Cap = `high` (NEVER `xhigh` or `max`)**: Keep responses under **180 words**.
+2. **Reasoning Effort Cap = `high` (NEVER `xhigh` or `max`)**: Write clear, natural, well-structured responses for the user while offloading heavy code/file authoring to workers.
 3. **No Raw File Ingestion**:
    - Delegate codebase exploration to `@worker-nemotron` (0 cost) and receive `<150-word` summaries.
    - Use MCP `inspect_workspace_changes(max_chars=2000)` and `read_file_excerpt` (max 60 lines).
