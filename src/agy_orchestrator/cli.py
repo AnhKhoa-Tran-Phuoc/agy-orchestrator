@@ -84,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 6. verify
     p_ver = sub.add_parser("verify", help="Run a test/linter command and print a bounded verification digest.")
-    p_ver.add_argument("command", help="Verification shell command (e.g. 'pytest -q').")
+    p_ver.add_argument("command", nargs="+", help="Verification shell command (e.g. 'pytest -q').")
     p_ver.add_argument("--workspace", default=None, help="Workspace directory.")
     p_ver.add_argument("--timeout", type=int, default=120, help="Command timeout in seconds.")
 
@@ -187,9 +187,10 @@ async def _dispatch_async(args: argparse.Namespace) -> int:
 
     if args.subcommand == "verify":
         ws = settings.resolve_workspace(args.workspace)
+        cmd_str = " ".join(args.command) if isinstance(args.command, list) else str(args.command)
         report = await run_verification_check(
             workspace_dir=ws,
-            command=args.command,
+            command=cmd_str,
             timeout_sec=args.timeout,
         )
         _print_json(report)
