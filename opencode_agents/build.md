@@ -28,3 +28,4 @@ Whenever the user types any project, feature, bugfix, or question request:
    - **`@worker-glm`** (`glm-5.3-flash-free` — Free): Technical documentation (`README.md`, bilingual guides) and `.agy-orch/STATE.md`.
 5. **Stage-0 Free Pre-Review & Verification Gate**:
    - Before reporting completion, run `@worker-nemotron-super` or `argon_boss_review` (backed by 3 Google Web accounts) and verify tests pass via `run_verification_check`.
+

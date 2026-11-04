@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -162,6 +164,45 @@ def install_to_opencode(
         repo_agents_md = src_agents_dir.parent / "AGENTS.md"
         if repo_agents_md.is_file():
             shutil.copy2(repo_agents_md, base_dir / "AGENTS.md")
+
+        # If installing into the real global OpenCode directory, also notify the live OpenCode service
+        if target_dir is None or base_dir == default_opencode_global_dir().resolve():
+            oc_cli = shutil.which("opencode") or shutil.which("opencode-cli")
+            if not oc_cli and os.name == "nt":
+                roaming = os.environ.get("APPDATA", "")
+                cand = Path(roaming) / "ai.opencode.desktop" / "cli" / "2.2.5-x64" / "opencode-cli.exe"
+                if cand.is_file():
+                    oc_cli = str(cand)
+            if oc_cli:
+                cmd = [
+                    oc_cli,
+                    "mcp",
+                    "add",
+                    "--global",
+                    "--env",
+                    "PYTHONIOENCODING=utf-8",
+                ]
+                if agy_bin is not None:
+                    cmd.extend(["--env", f"AGY_BIN={agy_bin.resolve()}"])
+                cmd.extend(
+                    [
+                        "antigravity_workers",
+                        "--",
+                        str(Path(sys.executable).resolve()),
+                        "-m",
+                        "agy_orchestrator.mcp_server",
+                    ]
+                )
+                try:
+                    subprocess.run(
+                        cmd,
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        timeout=8,
+                        check=False,
+                    )
+                except Exception:
+                    pass
 
     return {
         "dry_run": dry_run,
