@@ -71,7 +71,7 @@ class OrchestratorSettings:
         default_factory=lambda: os.environ.get("AGY_DEFAULT_MODE", "accept-edits")
     )
     default_timeout_sec: int = field(
-        default_factory=lambda: int(os.environ.get("AGY_TIMEOUT_SEC", "300"))
+        default_factory=lambda: int(os.environ.get("AGY_TIMEOUT_SEC", "900"))
     )
     max_summary_chars: int = field(
         default_factory=lambda: int(os.environ.get("AGY_MAX_SUMMARY_CHARS", "1800"))

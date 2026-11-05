@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional reasoning effort override.",
     )
     p_del.add_argument("--allow-shell", action="store_true", help="Allow sandboxed shell execution.")
-    p_del.add_argument("--timeout", type=int, default=300, help="Timeout in seconds (default: 300).")
+    p_del.add_argument("--timeout", type=int, default=900, help="Timeout in seconds (default: 900).")
 
     # 3. resume
     p_res = sub.add_parser("resume", help="Continue an existing Antigravity worker session by conversation_id.")
@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_res.add_argument("--model", default=None, help="Explicit model override.")
     p_res.add_argument("--workspace", default=None, help="Target workspace directory.")
     p_res.add_argument("--allow-shell", action="store_true", help="Allow sandboxed shell execution.")
-    p_res.add_argument("--timeout", type=int, default=300, help="Timeout in seconds.")
+    p_res.add_argument("--timeout", type=int, default=900, help="Timeout in seconds (default: 900).")
 
     # 4. inspect
     p_ins = sub.add_parser("inspect", help="Inspect workspace Git changes or recent files with low token output.")

@@ -127,7 +127,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         on_argon_exhausted: Literal["web_auto", "web_handoff", "secondary_models"] = "web_auto",
         use_web_directly: bool = False,
         conversation_id: str | None = None,
-        timeout_sec: int = 300,
+        timeout_sec: int = 900,
     ) -> dict[str, Any]:
         target_ws = cfg.resolve_workspace(workspace_dir)
         explicit_model = f"gemini-4-argon-{argon_level}"
@@ -252,7 +252,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         output_files: list[str] | None = None,
         conversation_id: str | None = None,
         allow_shell: bool = False,
-        timeout_sec: int = 300,
+        timeout_sec: int = 900,
         verify_command: str | None = None,
         max_reflexion_retries: int = 2,
         rollback_on_circuit_breaker: bool = False,
@@ -292,7 +292,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         effort: EffortLevel | None = None,
         mode: ExecutionMode = "accept-edits",
         allow_shell: bool = False,
-        timeout_sec: int = 300,
+        timeout_sec: int = 900,
         verify_command: str | None = None,
         max_reflexion_retries: int = 2,
         rollback_on_circuit_breaker: bool = False,
@@ -328,7 +328,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         model: str | None = None,
         output_files: list[str] | None = None,
         allow_shell: bool = False,
-        timeout_sec: int = 300,
+        timeout_sec: int = 900,
     ) -> dict[str, Any]:
         spec = WorkerTaskSpec(
             prompt=feedback_prompt,
@@ -353,7 +353,7 @@ def create_mcp_server(settings: OrchestratorSettings | None = None) -> MCPServer
         tasks: list[ParallelTaskItem],
         workspace_dir: str | None = None,
         max_concurrency: int = 3,
-        timeout_sec: int = 300,
+        timeout_sec: int = 900,
     ) -> dict[str, Any]:
         specs = [
             WorkerTaskSpec(

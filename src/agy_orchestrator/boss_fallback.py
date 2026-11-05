@@ -137,7 +137,7 @@ async def run_boss_with_fallback(
     on_argon_exhausted: Literal["web_auto", "web_handoff", "secondary_models"] = "web_auto",
     use_web_directly: bool = False,
     conversation_id: str | None = None,
-    timeout_sec: int = 300,
+    timeout_sec: int = 900,
     open_browser_on_exhaustion: bool = True,
 ) -> dict[str, Any]:
     """Execute a Boss review/planning prompt tailored for a Google One AI Pro account:
