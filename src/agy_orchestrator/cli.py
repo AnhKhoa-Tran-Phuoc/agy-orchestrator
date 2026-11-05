@@ -10,6 +10,10 @@ import sys
 from typing import Any
 
 from agy_orchestrator.account_pool import format_per_model_quota_table
+from agy_orchestrator.antigravity_installer import (
+    install_to_antigravity,
+    uninstall_from_antigravity,
+)
 from agy_orchestrator.codex_installer import install_to_codex, uninstall_from_codex
 from agy_orchestrator.config import OrchestratorSettings
 from agy_orchestrator.gemini_web_cdp import (
@@ -155,6 +159,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_oc_uninst.add_argument("--target-dir", default=None, help="Custom OpenCode config or project directory.")
     p_oc_uninst.add_argument("--project", action="store_true", help="Uninstall from project directory.")
+
+    # install-antigravity
+    p_ag_inst = sub.add_parser(
+        "install-antigravity",
+        help="Install `antigravity_workers` MCP server, skills, and rules into Antigravity IDE and CLI.",
+    )
+    p_ag_inst.add_argument(
+        "--target-dir",
+        default=None,
+        help="Custom Antigravity config or project directory (defaults to `~/.gemini/config`).",
+    )
+    p_ag_inst.add_argument(
+        "--project",
+        action="store_true",
+        help="Install into a project directory (`.agents/mcp_config.json` + `.agents/skills/`) instead of global.",
+    )
+    p_ag_inst.add_argument("--workspace", default=None, help="Optional default workspace path for Antigravity workers.")
+    p_ag_inst.add_argument("--dry-run", action="store_true", help="Preview installation without writing files.")
+
+    # uninstall-antigravity
+    p_ag_uninst = sub.add_parser(
+        "uninstall-antigravity",
+        help="Remove managed `antigravity_workers` MCP server and plugin from Antigravity.",
+    )
+    p_ag_uninst.add_argument("--target-dir", default=None, help="Custom Antigravity config or project directory.")
+    p_ag_uninst.add_argument("--project", action="store_true", help="Uninstall from project directory.")
 
     # 13. web-login
     p_wlogin = sub.add_parser(
@@ -352,6 +382,24 @@ async def _dispatch_async(args: argparse.Namespace) -> int:
     if args.subcommand == "uninstall-opencode":
         target_dir = Path(args.target_dir) if args.target_dir else None
         _print_json(uninstall_from_opencode(target_dir=target_dir, is_project=args.project))
+        return 0
+
+    if args.subcommand == "install-antigravity":
+        target_dir = Path(args.target_dir) if args.target_dir else None
+        default_ws = Path(args.workspace) if args.workspace else None
+        info = install_to_antigravity(
+            target_dir=target_dir,
+            is_project=args.project,
+            agy_bin=settings.agy_bin,
+            default_workspace=default_ws,
+            dry_run=args.dry_run,
+        )
+        _print_json(info)
+        return 0
+
+    if args.subcommand == "uninstall-antigravity":
+        target_dir = Path(args.target_dir) if args.target_dir else None
+        _print_json(uninstall_from_antigravity(target_dir=target_dir, is_project=args.project))
         return 0
 
     if args.subcommand == "web-login":
